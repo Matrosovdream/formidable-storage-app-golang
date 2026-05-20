@@ -1,0 +1,27 @@
+.git
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Build artefacts
+bin/
+tmp/
+*.log
+
+# Sub-trees we never want copied into the image
+project-reference/
+project-plan/
+.claude/
+
+# Tests / docs that don't belong in image
+test/
+*.md
+!README.md

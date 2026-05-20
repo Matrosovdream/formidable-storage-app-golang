@@ -1,0 +1,25 @@
+# Binaries
+bin/
+tmp/
+*.exe
+*.test
+*.out
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Coverage
+coverage.out
+*.cover
+
+# Local-only working folders (not part of the shipped repo)
+project-reference/
+project-plan/
+.claude/

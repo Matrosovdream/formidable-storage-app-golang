@@ -1,0 +1,27 @@
+CREATE TABLE frm_emails_log (
+    id              BIGSERIAL PRIMARY KEY,
+    entry_id        INTEGER NULL,
+    site_id         BIGINT NOT NULL,
+    form_id         INTEGER NULL,
+    subject         VARCHAR(255) NOT NULL,
+    message_id      VARCHAR(255) NULL,
+    email_from      VARCHAR(255) NULL,
+    email_to        VARCHAR(255) NULL,
+    people          TEXT NULL,
+    headers         TEXT NULL,
+    error_text      TEXT NULL,
+    content_plain   TEXT NOT NULL,
+    content_html    TEXT NOT NULL,
+    status          SMALLINT NOT NULL DEFAULT 0,
+    date_sent       TIMESTAMP NULL,
+    mailer          VARCHAR(255) NULL,
+    attachments     SMALLINT NOT NULL DEFAULT 0,
+    initiator_name  VARCHAR(255) NULL,
+    initiator_file  TEXT NULL,
+    original_log_id INTEGER NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT frm_emails_log_site_id_fk FOREIGN KEY (site_id) REFERENCES sites (id) ON DELETE CASCADE,
+    CONSTRAINT frm_emails_log_unique UNIQUE (site_id, message_id)
+);
+CREATE INDEX frm_emails_log_site_id_index ON frm_emails_log (site_id);

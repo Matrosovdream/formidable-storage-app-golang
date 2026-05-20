@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS site_tokens;
+DROP TABLE IF EXISTS sites;

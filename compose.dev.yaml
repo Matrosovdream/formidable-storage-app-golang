@@ -1,0 +1,91 @@
+# Dev stack: source-mounted, hot-reload via air, ports exposed for local tooling.
+#
+# Usage:
+#   docker compose -f compose.dev.yaml up --build
+#   docker compose -f compose.dev.yaml down
+
+name: fsa-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-laravel}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret}
+      POSTGRES_DB: ${DB_DATABASE:-app}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-laravel} -d ${DB_DATABASE:-app}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  adminer:
+    image: adminer:4.8.1-standalone
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: pepa-linha
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  web:
+    build:
+      context: .
+      target: dev
+    env_file: [.env]
+    environment:
+      AIR_BIN: web
+      APP_PORT: 8080
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./:/src
+      - gocache:/root/.cache/go-build
+      - gomod:/go/pkg/mod
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+
+  worker:
+    build:
+      context: .
+      target: dev
+    env_file: [.env]
+    environment:
+      AIR_BIN: worker
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    volumes:
+      - ./:/src
+      - gocache:/root/.cache/go-build
+      - gomod:/go/pkg/mod
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
+  gocache:
+  gomod:
