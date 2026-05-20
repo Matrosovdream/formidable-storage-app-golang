@@ -1,6 +1,7 @@
 // cmd/seed populates the dev database with dummy reference data so the REST API
 // can be exercised end-to-end:
 //
+//   - users:        one superadmin (idempotent on email) with a fresh sanctum token
 //   - frm_entry_update_types: code/title pairs used by entry-history payloads
 //   - sites:        one "Demo Site" (idempotent on URL)
 //   - site_tokens:  one token attached to that site, printed at the end
@@ -14,8 +15,9 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,11 +26,16 @@ import (
 
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/config"
 	"github.com/jmoiron/sqlx"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
 	siteName = "Demo Site"
 	siteURL  = "https://demo.local/"
+
+	adminName     = "Super Admin"
+	adminEmail    = "admin@admin.com"
+	adminPassword = "123123"
 )
 
 var updateTypes = []struct{ code, title string }{
@@ -61,12 +68,26 @@ func main() {
 	must(err)
 	defer db.Close()
 
+	bcryptCost := cfg.Auth.BcryptCost
+	if bcryptCost <= 0 {
+		bcryptCost = bcrypt.DefaultCost
+	}
+
+	adminID, adminCreated := upsertAdminUser(ctx, db, bcryptCost)
+	adminToken := issueSanctumToken(ctx, db, adminID)
 	siteID, token, isNew := upsertSite(ctx, db)
 	seedUpdateTypes(ctx, db)
 	seedFields(ctx, db, siteID)
 	seedEmails(ctx, db, siteID)
 	seedHistory(ctx, db, siteID)
 
+	fmt.Println("---")
+	fmt.Printf("Admin user:     id=%d email=%s\n", adminID, adminEmail)
+	fmt.Printf("Admin password: %s\n", adminPassword)
+	fmt.Printf("Admin sanctum:  %s\n", adminToken)
+	if !adminCreated {
+		fmt.Println("(admin already existed; password reset to the value above; new sanctum token issued)")
+	}
 	fmt.Println("---")
 	fmt.Printf("Demo site:      id=%d url=%s\n", siteID, siteURL)
 	fmt.Printf("REST bearer:    %s\n", token)
@@ -77,6 +98,43 @@ func main() {
 	fmt.Println("Fields:        ", len(fields))
 	fmt.Println("Emails:         3 rows")
 	fmt.Println("Entry history:  3 rows")
+}
+
+// ---------- admin user (idempotent on email) ----------
+
+func upsertAdminUser(ctx context.Context, db *sqlx.DB, bcryptCost int) (userID int64, created bool) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcryptCost)
+	must(err)
+
+	err = db.GetContext(ctx, &userID, "SELECT id FROM users WHERE email = $1", adminEmail)
+	if err == nil {
+		_, err := db.ExecContext(ctx,
+			"UPDATE users SET name=$1, password=$2, updated_at=NOW() WHERE id=$3",
+			adminName, string(hash), userID)
+		must(err)
+		return userID, false
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		fail("lookup admin: %v", err)
+	}
+	must(db.QueryRowxContext(ctx,
+		"INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id",
+		adminName, adminEmail, string(hash),
+	).Scan(&userID))
+	return userID, true
+}
+
+// issueSanctumToken creates a personal_access_tokens row for userID and returns the wire-format "<id>|<plain>".
+func issueSanctumToken(ctx context.Context, db *sqlx.DB, userID int64) string {
+	plain := randomHex(40)
+	hash := sha256.Sum256([]byte(plain))
+	var tokenID int64
+	must(db.QueryRowxContext(ctx,
+		`INSERT INTO personal_access_tokens (tokenable_type, tokenable_id, name, token, abilities)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		"App\\Models\\User", userID, "seed", hex.EncodeToString(hash[:]), `["*"]`,
+	).Scan(&tokenID))
+	return fmt.Sprintf("%d|%s", tokenID, plain)
 }
 
 // ---------- site + token (idempotent) ----------
