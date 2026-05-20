@@ -1,0 +1,885 @@
+openapi: 3.1.0
+info:
+  title: Formidable Storage App API
+  version: 1.0.0
+  description: |
+    HTTP API for the formidable-storage-app Go service.
+
+    ## Authentication
+
+    Two distinct auth schemes are in use:
+
+    - **`bearerAuth`** — Sanctum-style personal access tokens. Used for every `/api/*` route except `/api/login`, `/api/register`, and (optional) `/api/user`. Token format: `<id>|<plaintext>` returned by `/api/login` and `/api/register`. Send as `Authorization: Bearer <id>|<plaintext>`.
+    - **`siteTokenAuth`** — Site-scoped bearer token from `site_tokens.token`. Used for every `/rest/v1/*` route. Send as `Authorization: Bearer <token>`.
+
+    ## Error envelope
+
+    All non-2xx responses share the shape:
+
+    ```json
+    { "success": false, "code": 422, "message": "...", "errors": { "field": ["..."] } }
+    ```
+
+    `errors` is only present for 422 (validation) responses. `debug` may appear in 500s when `APP_DEBUG=true`.
+
+    ## Pagination wrapper
+
+    List endpoints return a Laravel-shaped paginator: `{ current_page, data, first_page_url, from, last_page, last_page_url, next_page_url, path, per_page, prev_page_url, to, total }`.
+
+servers:
+  - url: http://localhost:8080
+    description: Local dev
+
+tags:
+  - name: System
+    description: Health and meta
+  - name: Auth
+    description: Login / register / logout / current user
+  - name: Sites
+    description: Site CRUD (Sanctum-protected)
+  - name: Data
+    description: Per-entry summaries and detail views (Sanctum-protected)
+  - name: REST v1 — Status
+  - name: REST v1 — Fields
+  - name: REST v1 — Entry History
+  - name: REST v1 — Email Logs
+  - name: REST v1 — Shipment History
+
+security: []
+
+paths:
+  # ---------------- System ----------------
+  /health:
+    get:
+      tags: [System]
+      summary: Service health probe
+      description: Returns 200 with DB+Redis check results, or 503 if either is down.
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+        '503':
+          description: At least one dependency is down
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+
+  # ---------------- Auth ----------------
+  /api/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate with email + password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            examples:
+              demo:
+                value: { email: alice@example.com, password: "passw0rd!" }
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/register:
+    post:
+      tags: [Auth]
+      summary: Create a new user account and issue a token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/user:
+    get:
+      tags: [Auth]
+      summary: Return the authenticated user or null
+      description: Mirrors Laravel's `Route::get('/user', fn ($r) => $r->user())` — returns the user payload when a valid bearer is supplied, or literal JSON `null` otherwise. Never returns 401.
+      security:
+        - bearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: User payload or null
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/User'
+                  - type: 'null'
+
+  /api/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current bearer token
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string, example: Logged out }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ---------------- Sites ----------------
+  /api/sites/list:
+    get:
+      tags: [Sites]
+      summary: List all sites
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Sites
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Site' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/sites/view/{site_id}:
+    get:
+      tags: [Sites]
+      summary: View a single site with stats + REST token
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+      responses:
+        '200':
+          description: Site detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SiteWithStats' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/sites/create:
+    get:
+      tags: [Sites]
+      summary: Form metadata for creating a site
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Field descriptors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  form:
+                    type: object
+                    properties:
+                      fields:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name: { type: string }
+                            required: { type: boolean }
+                            type: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/sites/store:
+    post:
+      tags: [Sites]
+      summary: Create a new site (issues a REST token)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSiteRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SiteWithStats' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/sites/delete/{site_id}:
+    delete:
+      tags: [Sites]
+      summary: Delete a site (cascades to its tokens + data)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------- Data ----------------
+  /api/data/entries/{site_id}:
+    get:
+      tags: [Data]
+      summary: Paginated per-entry summary for a site
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - in: query
+          name: entry_id
+          schema: { type: integer, format: int64 }
+          description: Filter to a single entry id
+        - in: query
+          name: sort_by
+          schema: { type: string, enum: [entry_id, last_update, email_count, update_count] }
+        - in: query
+          name: sort_dir
+          schema: { type: string, enum: [asc, desc] }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 25, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: Page of entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/DataEntryRow' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/data/entries/{site_id}/{entry_id}/updates:
+    get:
+      tags: [Data]
+      summary: Field-by-field update history for one entry
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - $ref: '#/components/parameters/EntryIdPath'
+      responses:
+        '200':
+          description: Updates list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EntryUpdatesResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/data/entries/{site_id}/{entry_id}/emails:
+    get:
+      tags: [Data]
+      summary: Email log rows for one entry
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - $ref: '#/components/parameters/EntryIdPath'
+      responses:
+        '200':
+          description: Emails for the entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/EmailLogItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------- REST v1: Status ----------------
+  /rest/v1/status:
+    get:
+      tags: [REST v1 — Status]
+      summary: REST v1 reachability probe
+      security: [{ siteTokenAuth: [] }]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  version: { type: string, example: '1.0' }
+                  timestamp: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------- REST v1: Fields ----------------
+  /rest/v1/fields/update-all:
+    post:
+      tags: [REST v1 — Fields]
+      summary: Bulk upsert form-field definitions (async)
+      description: Enqueues a job that upserts rows into `frm_fields` keyed on (site_id, field_id). Returns immediately.
+      security: [{ siteTokenAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateFieldsRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/QueuedResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # ---------------- REST v1: Entry History ----------------
+  /rest/v1/entry/history/update:
+    post:
+      tags: [REST v1 — Entry History]
+      summary: Append entry-history rows (async)
+      description: Enqueues a job that appends rows into `frm_entry_history`. Unknown `field_id`s auto-create placeholder `frm_fields` rows.
+      security: [{ siteTokenAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEntryHistoryRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/QueuedResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /rest/v1/entry/history/view/{id}:
+    post:
+      tags: [REST v1 — Entry History]
+      summary: Fetch the formatted history for one entry
+      description: Path param `id` is the `entry_id`. Body is optional; future filters may be added here.
+      security: [{ siteTokenAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Entry updates
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EntryUpdatesResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------- REST v1: Email Logs ----------------
+  /rest/v1/emailslog/update-all:
+    post:
+      tags: [REST v1 — Email Logs]
+      summary: Bulk upsert email log rows (async)
+      description: Enqueues a job. Use `/update-all/raw` if you need the count synchronously.
+      security: [{ siteTokenAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEmailsLogRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/QueuedResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /rest/v1/emailslog/update-all/raw:
+    post:
+      tags: [REST v1 — Email Logs]
+      summary: Bulk upsert email log rows (sync)
+      description: Same payload as `/update-all`, but runs the upsert in-band and returns the row count.
+      security: [{ siteTokenAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEmailsLogRequest' }
+      responses:
+        '200':
+          description: Rows persisted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  count: { type: integer, example: 3 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /rest/v1/emailslog/list:
+    post:
+      tags: [REST v1 — Email Logs]
+      summary: Paginated list of email log rows
+      description: POST with body to carry filters. Filters allowed — `entry_id`, `form_id`, `status`, `mailer`, `message_id` (`=`); `subject`, `email_from`, `email_to` (ILIKE); `date_sent_from`, `date_sent_to` (range). Sort whitelist — `id`, `date_sent`, `status`, `subject`, `email_from`, `email_to`, `created_at`.
+      security: [{ siteTokenAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ListEmailsLogRequest' }
+      responses:
+        '200':
+          description: Page of rows
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/EmailLogItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------- REST v1: Shipment History ----------------
+  /rest/v1/ep-shipment-history/update-all:
+    post:
+      tags: [REST v1 — Shipment History]
+      summary: Append EasyPost shipment-history rows (async)
+      security: [{ siteTokenAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEpShipmentHistoryRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/QueuedResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /rest/v1/ep-shipment-history/list:
+    post:
+      tags: [REST v1 — Shipment History]
+      summary: Paginated list of EasyPost shipment-history rows
+      description: Filters allowed — `easypost_shipment_id`, `user_id`, `change_type` (`=`); `created_from`, `created_to` (range). Sort whitelist — `id`, `created_at`, `change_type`.
+      security: [{ siteTokenAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ListEpShipmentHistoryRequest' }
+      responses:
+        '200':
+          description: Page of rows
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/EpShipmentHistoryItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+# ============================================================
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: '<id>|<plaintext>'
+      description: |
+        Sanctum-style personal access token returned by `/api/login` and `/api/register`.
+        Send as `Authorization: Bearer 1|abcdef...`.
+    siteTokenAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Site-scoped bearer token from `site_tokens.token`. Created when a new site is stored
+        via `POST /api/sites/store`. Send as `Authorization: Bearer <token>`.
+
+  parameters:
+    SiteIdPath:
+      in: path
+      name: site_id
+      required: true
+      schema: { type: integer, format: int64 }
+    EntryIdPath:
+      in: path
+      name: entry_id
+      required: true
+      schema: { type: integer, format: int64 }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            code: 401
+            message: Unauthenticated.
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            code: 404
+            message: Not Found
+    ValidationError:
+      description: 422 — validation failed; `errors` is keyed by field name.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            code: 422
+            message: The given data was invalid.
+            errors:
+              email: ["These credentials do not match our records."]
+    QueuedResponse:
+      description: Job accepted into the Redis queue
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              queued: { type: boolean, example: true }
+              count:  { type: integer, example: 3, description: number of rows in the enqueued payload }
+
+  schemas:
+    # ---------- Envelope / generic ----------
+    ErrorEnvelope:
+      type: object
+      required: [success, code, message]
+      properties:
+        success: { type: boolean, example: false }
+        code: { type: integer, example: 422 }
+        message: { type: string, example: The given data was invalid. }
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+          nullable: true
+        debug:
+          type: string
+          description: Present only when `APP_DEBUG=true`
+          nullable: true
+
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        timestamp: { type: string, format: date-time }
+        checks:
+          type: object
+          properties:
+            database:
+              type: object
+              properties:
+                ok: { type: boolean }
+                error: { type: string, nullable: true }
+            redis:
+              type: object
+              properties:
+                ok: { type: boolean }
+                error: { type: string, nullable: true }
+
+    PaginatedBase:
+      type: object
+      properties:
+        current_page: { type: integer, example: 1 }
+        first_page_url: { type: string, example: /rest/v1/emailslog/list?page=1 }
+        from: { type: integer, example: 1 }
+        last_page: { type: integer, example: 4 }
+        last_page_url: { type: string, example: /rest/v1/emailslog/list?page=4 }
+        next_page_url: { type: string, nullable: true }
+        path: { type: string }
+        per_page: { type: integer, example: 25 }
+        prev_page_url: { type: string, nullable: true }
+        to: { type: integer, example: 25 }
+        total: { type: integer, example: 100 }
+
+    # ---------- Auth ----------
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1 }
+        remember: { type: boolean, default: false }
+
+    RegisterRequest:
+      type: object
+      required: [name, email, password, password_confirmation]
+      properties:
+        name: { type: string, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, minLength: 8 }
+        password_confirmation: { type: string }
+
+    LoginResponse:
+      type: object
+      required: [user, message]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        message: { type: string, example: Logged in }
+        token: { type: string, example: '1|abcdef0123456789...' }
+
+    User:
+      type: object
+      required: [id, name, email, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        email: { type: string, format: email }
+        email_verified_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    # ---------- Sites ----------
+    Site:
+      type: object
+      required: [id, name, url, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        url: { type: string, format: uri }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SiteWithStats:
+      allOf:
+        - $ref: '#/components/schemas/Site'
+        - type: object
+          properties:
+            token:
+              type: string
+              description: Site REST token. Returned by `/api/sites/store`; also returned by `/api/sites/view/{site_id}` if you need to look it up.
+            stats:
+              $ref: '#/components/schemas/SiteStats'
+
+    SiteStats:
+      type: object
+      properties:
+        fields: { type: integer, format: int64, example: 5 }
+        emails: { type: integer, format: int64, example: 0 }
+        entry_history: { type: integer, format: int64, example: 0 }
+        queue:
+          type: object
+          additionalProperties: { type: integer, format: int64 }
+          example: { fields: 0, emails: 0, entry_history: 0, shipment_history: 0 }
+
+    CreateSiteRequest:
+      type: object
+      required: [name, url]
+      properties:
+        name: { type: string, maxLength: 255 }
+        url:  { type: string, format: uri, maxLength: 255 }
+
+    # ---------- Data ----------
+    DataEntryRow:
+      type: object
+      required: [entry_id, site_id, email_count, update_count]
+      properties:
+        entry_id: { type: integer, format: int64 }
+        site_id: { type: integer, format: int64 }
+        last_update: { type: string, format: date-time, nullable: true }
+        email_count: { type: integer, format: int64 }
+        update_count: { type: integer, format: int64 }
+
+    EntryUpdateItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        field_id: { type: integer, format: int64 }
+        field_key: { type: string, nullable: true }
+        field_label: { type: string, nullable: true }
+        update_type: { type: string, nullable: true, description: code from `frm_entry_update_types.code` }
+        old_value: { type: string, nullable: true }
+        new_value: { type: string, nullable: true }
+        change_date: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    EntryUpdatesResponse:
+      type: object
+      required: [entry_id, updates]
+      properties:
+        entry_id: { type: integer, format: int64 }
+        updates:
+          type: array
+          items: { $ref: '#/components/schemas/EntryUpdateItem' }
+
+    EmailLogItem:
+      type: object
+      required: [id, site_id, status, attachments, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        entry_id: { type: integer, format: int64, nullable: true }
+        site_id: { type: integer, format: int64 }
+        form_id: { type: integer, format: int64, nullable: true }
+        subject: { type: string, nullable: true }
+        message_id: { type: string, nullable: true }
+        email_from: { type: string, nullable: true }
+        email_to: { type: string, nullable: true }
+        status: { type: integer }
+        date_sent: { type: string, format: date-time, nullable: true }
+        mailer: { type: string, nullable: true }
+        attachments: { type: integer }
+        initiator_name: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    # ---------- Fields ----------
+    FrmFieldInput:
+      type: object
+      required: [field_id]
+      properties:
+        field_id: { type: integer, format: int64 }
+        key:   { type: string }
+        type:  { type: string, example: text }
+        label: { type: string }
+
+    UpdateFieldsRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/FrmFieldInput' }
+
+    # ---------- Entry history ----------
+    EntryHistoryInput:
+      type: object
+      required: [entry_id, field_id]
+      properties:
+        entry_id: { type: integer, format: int64 }
+        field_id:
+          type: integer
+          format: int64
+          description: The external `field_id` (matches `frm_fields.field_id`, not the table PK).
+        user_id: { type: integer, format: int64, nullable: true }
+        update_type_code:
+          type: string
+          description: Lookup key into `frm_entry_update_types.code` (e.g. `created`, `updated`).
+        old_value: { type: string, nullable: true }
+        new_value: { type: string, nullable: true }
+        change_date: { type: string, format: date-time, nullable: true, description: RFC3339 string }
+
+    UpdateEntryHistoryRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/EntryHistoryInput' }
+
+    # ---------- Email log inputs ----------
+    FrmEmailLogInput:
+      type: object
+      required: [message_id]
+      properties:
+        entry_id: { type: integer, format: int64, nullable: true }
+        form_id: { type: integer, format: int64, nullable: true }
+        subject: { type: string, nullable: true }
+        message_id:
+          type: string
+          description: Acts as the natural key alongside the implicit `site_id`. Re-posting the same message_id updates the existing row.
+        email_from: { type: string, nullable: true }
+        email_to: { type: string, nullable: true }
+        people: { type: string, nullable: true }
+        headers: { type: string, nullable: true }
+        error_text: { type: string, nullable: true }
+        content_plain: { type: string, nullable: true }
+        content_html: { type: string, nullable: true }
+        status: { type: integer, default: 0 }
+        date_sent: { type: string, format: date-time, nullable: true }
+        mailer: { type: string, nullable: true }
+        attachments: { type: integer, default: 0 }
+        initiator_name: { type: string, nullable: true }
+        initiator_file: { type: string, nullable: true }
+        original_log_id: { type: integer, format: int64, nullable: true }
+
+    UpdateEmailsLogRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/FrmEmailLogInput' }
+
+    ListEmailsLogRequest:
+      type: object
+      properties:
+        filters:
+          type: object
+          additionalProperties: true
+          example: { subject: weekly, status: 0 }
+        sort_by: { type: string, example: id }
+        sort_dir: { type: string, enum: [asc, desc], example: desc }
+        paginate: { type: integer, example: 25 }
+        page_num: { type: integer, example: 1 }
+
+    # ---------- Shipment history ----------
+    EpShipmentHistoryInput:
+      type: object
+      properties:
+        easypost_shipment_id: { type: string, nullable: true }
+        user_id: { type: integer, format: int64, nullable: true }
+        change_type: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+
+    UpdateEpShipmentHistoryRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/EpShipmentHistoryInput' }
+
+    EpShipmentHistoryItem:
+      type: object
+      required: [id, site_id, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        easypost_shipment_id: { type: string, nullable: true }
+        user_id: { type: integer, format: int64, nullable: true }
+        site_id: { type: integer, format: int64 }
+        change_type: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ListEpShipmentHistoryRequest:
+      type: object
+      properties:
+        filters:
+          type: object
+          additionalProperties: true
+          example: { easypost_shipment_id: shp_abc, change_type: updated }
+        sort_by: { type: string, example: created_at }
+        sort_dir: { type: string, enum: [asc, desc], example: desc }
+        paginate: { type: integer, example: 25 }
+        page_num: { type: integer, example: 1 }

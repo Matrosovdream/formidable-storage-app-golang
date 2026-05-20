@@ -12,6 +12,7 @@ import (
 	apphttp "github.com/Matrosovdream/formidable-storage-app-golang/internal/delivery/http"
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/delivery/http/middleware"
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/delivery/http/route"
+	"github.com/Matrosovdream/formidable-storage-app-golang/internal/docs"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -38,6 +39,7 @@ func main() {
 	})
 
 	a.Get("/health", apphttp.HealthHandler(deps.DB, deps.Redis))
+	docs.Register(a)
 
 	ctrl := route.Controllers{
 		Auth:                    apphttp.NewAuthController(deps.Auth),
