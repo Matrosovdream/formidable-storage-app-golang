@@ -41,6 +41,7 @@ type Deps struct {
 	// Use cases
 	Auth                    *usecase.AuthUseCase
 	Site                    *usecase.SiteUseCase
+	SiteGenerate            *usecase.SiteGenerateUseCase
 	FrmField                *usecase.FrmFieldUseCase
 	FrmEntryHistoryUC       *usecase.FrmEntryHistoryUseCase
 	FrmEmailLogUC           *usecase.FrmEmailLogUseCase
@@ -100,6 +101,7 @@ func Build(ctx context.Context, cfg *config.Config) (*Deps, error) {
 	emailUC := usecase.NewFrmEmailLogUseCase(frmEmailLog)
 	epHistoryUC := usecase.NewFrmEpShipmentHistoryUseCase(frmEpShipmentHistory)
 	dataUC := usecase.NewDataUseCase(db, historyUC, emailUC)
+	siteGenUC := usecase.NewSiteGenerateUseCase(sites, frmEmailLog, frmFields, frmEntryHistory, frmEntryUpdateTypes)
 
 	return &Deps{
 		Cfg:      cfg,
@@ -123,6 +125,7 @@ func Build(ctx context.Context, cfg *config.Config) (*Deps, error) {
 
 		Auth:                    authUC,
 		Site:                    siteUC,
+		SiteGenerate:            siteGenUC,
 		FrmField:                fieldUC,
 		FrmEntryHistoryUC:       historyUC,
 		FrmEmailLogUC:           emailUC,

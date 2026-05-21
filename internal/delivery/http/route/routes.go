@@ -12,6 +12,7 @@ import (
 type Controllers struct {
 	Auth                   *apphttp.AuthController
 	Site                   *apphttp.SiteController
+	SiteGenerate           *apphttp.SiteGenerateController
 	Data                   *apphttp.DataController
 	RestV1EntryHistory     *apphttp.RestV1EntryHistoryController
 	RestV1Fields           *apphttp.RestV1FieldsController
@@ -40,6 +41,10 @@ func Register(app *fiber.App, ctrl Controllers, mw Middleware) {
 	sites.Get("/create", ctrl.Site.Create).Name("api-sites-create")
 	sites.Post("/store", ctrl.Site.Store).Name("api-sites-store")
 	sites.Delete("/delete/:site_id", ctrl.Site.Delete).Name("api-sites-delete")
+
+	sites.Post("/generate/:site_id/emails", ctrl.SiteGenerate.Emails).Name("api-sites-generate-emails")
+	sites.Post("/generate/:site_id/fields", ctrl.SiteGenerate.Fields).Name("api-sites-generate-fields")
+	sites.Post("/generate/:site_id/entry-updates", ctrl.SiteGenerate.EntryUpdates).Name("api-sites-generate-entry-updates")
 
 	data := api.Group("/data", mw.AuthSanctum)
 	data.Get("/entries/:site_id", ctrl.Data.Entries).Name("api-data-entries")

@@ -37,6 +37,11 @@ tags:
     description: Login / register / logout / current user
   - name: Sites
     description: Site CRUD (Sanctum-protected)
+  - name: Sites — Generate
+    description: |
+      Bulk generation of dummy emails / fields / entry-updates for a site (Sanctum-protected).
+      Useful for seeding load-test data; every response reports `generation_ms`, `insertion_ms`
+      and `total_ms` wall-clock timings.
   - name: Data
     description: Per-entry summaries and detail views (Sanctum-protected)
   - name: REST v1 — Status
@@ -238,6 +243,118 @@ paths:
                 type: object
                 properties:
                   success: { type: boolean, example: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------- Sites — Generate ----------------
+  /api/sites/generate/{site_id}/emails:
+    post:
+      tags: [Sites — Generate]
+      summary: Generate N dummy email-log rows for a site
+      description: |
+        Builds `amount` `frm_emails_log` rows in memory with randomized subject,
+        from/to addresses, plain-text + HTML content (each roughly `length` chars),
+        mailer, status and `date_sent`, then bulk-upserts them by `(site_id, message_id)`.
+
+        Both the in-memory generation phase and the DB-insertion phase are timed
+        independently and returned in the response.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - in: query
+          name: amount
+          schema: { type: integer, minimum: 1, maximum: 10000, default: 10 }
+          description: How many rows to generate. Defaults to 10, capped at 10000.
+        - in: query
+          name: length
+          schema: { type: integer, minimum: 1, maximum: 100000, default: 200 }
+          description: Approximate character length of each email's `content_plain` and `content_html` body.
+      responses:
+        '200':
+          description: Rows generated and inserted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenerateResponse' }
+              example:
+                success: true
+                kind: emails
+                site_id: 1
+                count: 100
+                length: 200
+                timings:
+                  generation_ms: 6.412
+                  insertion_ms: 48.117
+                  total_ms: 54.529
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/sites/generate/{site_id}/fields:
+    post:
+      tags: [Sites — Generate]
+      summary: Generate N dummy field rows for a site
+      description: |
+        Builds `amount` `frm_fields` rows with timestamp-derived `field_id`s, random
+        key/type/label, and upserts them via `(site_id, field_id)`. Reports both
+        generation and DB-insertion wall-clock cost.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - in: query
+          name: amount
+          schema: { type: integer, minimum: 1, maximum: 10000, default: 10 }
+          description: How many rows to generate. Defaults to 10, capped at 10000.
+      responses:
+        '200':
+          description: Rows generated and inserted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenerateResponse' }
+              example:
+                success: true
+                kind: fields
+                site_id: 1
+                count: 50
+                timings:
+                  generation_ms: 0.881
+                  insertion_ms: 124.502
+                  total_ms: 125.383
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/sites/generate/{site_id}/entry-updates:
+    post:
+      tags: [Sites — Generate]
+      summary: Generate N dummy entry-history rows for a site
+      description: |
+        Builds `amount` `frm_entry_history` rows attached to random existing fields
+        of the site. If the site has no fields yet, a placeholder field is created
+        first. `update_type_id` is set from a random row of `frm_entry_update_types`
+        (when any are seeded). Reports both generation and DB-insertion timings.
+
+        The generation phase counts the prep reads (existing fields + update-type
+        lookup) since they happen before the bulk INSERT.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - in: query
+          name: amount
+          schema: { type: integer, minimum: 1, maximum: 10000, default: 10 }
+          description: How many rows to generate. Defaults to 10, capped at 10000.
+      responses:
+        '200':
+          description: Rows generated and inserted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenerateResponse' }
+              example:
+                success: true
+                kind: entry_updates
+                site_id: 1
+                count: 200
+                timings:
+                  generation_ms: 3.122
+                  insertion_ms: 71.998
+                  total_ms: 75.120
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -698,6 +815,42 @@ components:
       properties:
         name: { type: string, maxLength: 255 }
         url:  { type: string, format: uri, maxLength: 255 }
+
+    # ---------- Sites — Generate ----------
+    GenerateTimings:
+      type: object
+      required: [generation_ms, insertion_ms, total_ms]
+      description: Wall-clock cost of the two phases of a /generate call, in milliseconds.
+      properties:
+        generation_ms:
+          type: number
+          format: double
+          description: Time spent producing the in-memory rows (plus any small prep reads).
+        insertion_ms:
+          type: number
+          format: double
+          description: Time spent on the bulk INSERT / UPSERT call(s).
+        total_ms:
+          type: number
+          format: double
+          description: Sum of `generation_ms` + `insertion_ms`.
+
+    GenerateResponse:
+      type: object
+      required: [success, kind, site_id, count, timings]
+      properties:
+        success: { type: boolean, example: true }
+        kind:
+          type: string
+          enum: [emails, fields, entry_updates]
+          description: Which generator produced this response.
+        site_id: { type: integer, format: int64 }
+        count: { type: integer, description: Number of rows actually generated + inserted. }
+        length:
+          type: integer
+          nullable: true
+          description: Echoed back only for the `emails` generator — the per-email content length used.
+        timings: { $ref: '#/components/schemas/GenerateTimings' }
 
     # ---------- Data ----------
     DataEntryRow:
