@@ -14,6 +14,7 @@ import (
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/delivery/http/route"
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/docs"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 )
 
 func main() {
@@ -37,6 +38,12 @@ func main() {
 		WriteTimeout: 15 * time.Second,
 		ErrorHandler: apphttp.ErrorHandler(deps.Log, cfg.App.Debug),
 	})
+
+	a.Use(cors.New(cors.Config{
+		AllowOrigins: cfg.CORS.AllowedOrigins,
+		AllowMethods: cfg.CORS.AllowedMethods,
+		AllowHeaders: cfg.CORS.AllowedHeaders,
+	}))
 
 	a.Get("/health", apphttp.HealthHandler(deps.DB, deps.Redis))
 	docs.Register(a)

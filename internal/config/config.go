@@ -16,6 +16,7 @@ type Config struct {
 	Auth  AuthConfig
 	Mail  MailConfig
 	Log   LogConfig
+	CORS  CORSConfig
 }
 
 type AppConfig struct {
@@ -25,6 +26,12 @@ type AppConfig struct {
 	URL      string
 	Debug    bool
 	Timezone string
+}
+
+type CORSConfig struct {
+	AllowedOrigins string
+	AllowedMethods string
+	AllowedHeaders string
 }
 
 type DBConfig struct {
@@ -143,6 +150,11 @@ func Load() (*Config, error) {
 		Log: LogConfig{
 			Level: v.GetString("LOG_LEVEL"),
 		},
+		CORS: CORSConfig{
+			AllowedOrigins: v.GetString("CORS_ALLOWED_ORIGINS"),
+			AllowedMethods: v.GetString("CORS_ALLOWED_METHODS"),
+			AllowedHeaders: v.GetString("CORS_ALLOWED_HEADERS"),
+		},
 	}
 	return cfg, nil
 }
@@ -180,6 +192,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("BCRYPT_ROUNDS", 12)
 
 	v.SetDefault("LOG_LEVEL", "info")
+
+	v.SetDefault("CORS_ALLOWED_ORIGINS", "*")
+	v.SetDefault("CORS_ALLOWED_METHODS", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+	v.SetDefault("CORS_ALLOWED_HEADERS", "Origin,Content-Type,Accept,Authorization,X-Requested-With")
 }
 
 func (c *DBConfig) DSN() string {
