@@ -897,6 +897,8 @@ components:
         message_id: { type: string, nullable: true }
         email_from: { type: string, nullable: true }
         email_to: { type: string, nullable: true }
+        content_plain: { type: string, nullable: true, description: Plain-text message body. }
+        content_html: { type: string, nullable: true, description: HTML message body. }
         status: { type: integer }
         date_sent: { type: string, format: date-time, nullable: true }
         mailer: { type: string, nullable: true }

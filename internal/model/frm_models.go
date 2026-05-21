@@ -103,6 +103,8 @@ type EmailLogItem struct {
 	MessageID     *string    `json:"message_id"`
 	EmailFrom     *string    `json:"email_from"`
 	EmailTo       *string    `json:"email_to"`
+	ContentPlain  *string    `json:"content_plain"`
+	ContentHTML   *string    `json:"content_html"`
 	Status        int16      `json:"status"`
 	DateSent      *time.Time `json:"date_sent"`
 	Mailer        *string    `json:"mailer"`

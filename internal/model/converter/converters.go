@@ -65,6 +65,8 @@ func ToEmailLogItem(l *entity.FrmEmailLog) model.EmailLogItem {
 		MessageID:     NullString(l.MessageID),
 		EmailFrom:     NullString(l.EmailFrom),
 		EmailTo:       NullString(l.EmailTo),
+		ContentPlain:  NullString(l.ContentPlain),
+		ContentHTML:   NullString(l.ContentHTML),
 		Status:        l.Status,
 		DateSent:      NullTime(l.DateSent),
 		Mailer:        NullString(l.Mailer),
