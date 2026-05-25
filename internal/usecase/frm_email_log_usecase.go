@@ -87,6 +87,54 @@ func (u *FrmEmailLogUseCase) List(ctx context.Context, siteID int64, req model.L
 	}, nil
 }
 
+// ListBySite returns a paginated list of email-log rows for siteID, applying the optional filters/sort.
+// Content fields (content_plain, content_html) are always included via the EmailLogItem converter.
+func (u *FrmEmailLogUseCase) ListBySite(ctx context.Context, siteID int64, req model.SiteEmailsRequest) (repository.ListResult[model.EmailLogItem], error) {
+	filters := map[string]any{}
+	if req.EntryID != nil {
+		filters["entry_id"] = *req.EntryID
+	}
+	if req.FormID != nil {
+		filters["form_id"] = *req.FormID
+	}
+	if req.Status != nil {
+		filters["status"] = *req.Status
+	}
+	if req.Mailer != nil && *req.Mailer != "" {
+		filters["mailer"] = *req.Mailer
+	}
+	if req.MessageID != nil && *req.MessageID != "" {
+		filters["message_id"] = *req.MessageID
+	}
+	if req.Subject != nil && *req.Subject != "" {
+		filters["subject"] = *req.Subject
+	}
+	if req.EmailFrom != nil && *req.EmailFrom != "" {
+		filters["email_from"] = *req.EmailFrom
+	}
+	if req.EmailTo != nil && *req.EmailTo != "" {
+		filters["email_to"] = *req.EmailTo
+	}
+
+	res, err := u.emails.List(ctx, nil, siteID, repository.ListParams{
+		Filters: filters,
+		SortBy:  req.SortBy,
+		SortDir: req.SortDir,
+		Page:    req.Page,
+		PerPage: req.PerPage,
+	})
+	if err != nil {
+		return repository.ListResult[model.EmailLogItem]{}, err
+	}
+	return repository.ListResult[model.EmailLogItem]{
+		Data:     converter.ToEmailLogItems(res.Data),
+		Total:    res.Total,
+		Page:     res.Page,
+		PerPage:  res.PerPage,
+		LastPage: res.LastPage,
+	}, nil
+}
+
 func (u *FrmEmailLogUseCase) FindByEntry(ctx context.Context, siteID, entryID int64) ([]model.EmailLogItem, error) {
 	items, err := u.emails.FindByEntry(ctx, nil, siteID, entryID)
 	if err != nil {

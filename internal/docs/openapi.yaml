@@ -182,6 +182,171 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/sites/view/{site_id}/emails:
+    get:
+      tags: [Sites]
+      summary: Paginated list of email logs for a site
+      description: |
+        Returns email-log rows scoped to a site, including both `content_plain` and `content_html`
+        bodies. All filters are optional; substring filters (`subject`, `email_from`, `email_to`)
+        use case-insensitive `ILIKE`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - in: query
+          name: entry_id
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: form_id
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: status
+          schema: { type: integer }
+        - in: query
+          name: mailer
+          schema: { type: string }
+        - in: query
+          name: message_id
+          schema: { type: string }
+        - in: query
+          name: subject
+          schema: { type: string }
+          description: ILIKE substring match.
+        - in: query
+          name: email_from
+          schema: { type: string }
+          description: ILIKE substring match.
+        - in: query
+          name: email_to
+          schema: { type: string }
+          description: ILIKE substring match.
+        - in: query
+          name: sort_by
+          schema: { type: string, enum: [id, date_sent, status, subject, email_from, email_to, created_at] }
+        - in: query
+          name: sort_dir
+          schema: { type: string, enum: [asc, desc] }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 25, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: Page of emails (with content)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/EmailLogItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/sites/view/{site_id}/fields:
+    get:
+      tags: [Sites]
+      summary: Paginated list of fields for a site
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - in: query
+          name: field_id
+          schema: { type: integer, format: int64 }
+          description: External `field_id` (matches `frm_fields.field_id`).
+        - in: query
+          name: type
+          schema: { type: string }
+        - in: query
+          name: key
+          schema: { type: string }
+          description: ILIKE substring match.
+        - in: query
+          name: label
+          schema: { type: string }
+          description: ILIKE substring match.
+        - in: query
+          name: sort_by
+          schema: { type: string, enum: [id, field_id, key, type, label, created_at, updated_at] }
+        - in: query
+          name: sort_dir
+          schema: { type: string, enum: [asc, desc] }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 25, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: Page of fields
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/FrmFieldResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/sites/view/{site_id}/entry-updates:
+    get:
+      tags: [Sites]
+      summary: Paginated, site-scoped entry-history feed
+      description: |
+        Returns `frm_entry_history` rows for a site, resolved against `frm_fields`
+        (for `field_key` / `field_label`) and `frm_entry_update_types` (for `update_type`).
+        `field_id` filter is interpreted as the external `frm_fields.field_id`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - in: query
+          name: entry_id
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: field_id
+          schema: { type: integer, format: int64 }
+          description: External `field_id` (matches `frm_fields.field_id`, not the table PK).
+        - in: query
+          name: user_id
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: sort_by
+          schema: { type: string, enum: [id, entry_id, field_id, change_date, created_at] }
+        - in: query
+          name: sort_dir
+          schema: { type: string, enum: [asc, desc] }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 25, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: Page of entry-update rows
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/SiteEntryUpdateItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/sites/create:
     get:
       tags: [Sites]
@@ -908,6 +1073,26 @@ components:
         updated_at: { type: string, format: date-time }
 
     # ---------- Fields ----------
+    FrmFieldResponse:
+      type: object
+      required: [id, site_id, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        field_id: { type: integer, format: int64, nullable: true }
+        site_id: { type: integer, format: int64 }
+        key: { type: string, nullable: true }
+        type: { type: string, nullable: true }
+        label: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SiteEntryUpdateItem:
+      allOf:
+        - $ref: '#/components/schemas/EntryUpdateItem'
+        - type: object
+          properties:
+            entry_id: { type: integer, format: int64, nullable: true }
+
     FrmFieldInput:
       type: object
       required: [field_id]

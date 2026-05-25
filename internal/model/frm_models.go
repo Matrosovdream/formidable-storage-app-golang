@@ -163,3 +163,58 @@ type DataEntriesRequest struct {
 	Page    int    `query:"page"     json:"page"`
 	PerPage int    `query:"per_page" json:"per_page"`
 }
+
+// ---------- Site-scoped browsing ----------
+
+// SiteEmailsRequest is the query payload for GET /api/sites/view/{site_id}/emails.
+type SiteEmailsRequest struct {
+	EntryID   *int64  `query:"entry_id"   json:"entry_id"`
+	FormID    *int64  `query:"form_id"    json:"form_id"`
+	Status    *int16  `query:"status"     json:"status"`
+	Mailer    *string `query:"mailer"     json:"mailer"`
+	MessageID *string `query:"message_id" json:"message_id"`
+	Subject   *string `query:"subject"    json:"subject"`
+	EmailFrom *string `query:"email_from" json:"email_from"`
+	EmailTo   *string `query:"email_to"   json:"email_to"`
+	SortBy    string  `query:"sort_by"    json:"sort_by"`
+	SortDir   string  `query:"sort_dir"   json:"sort_dir"`
+	Page      int     `query:"page"       json:"page"`
+	PerPage   int     `query:"per_page"   json:"per_page"`
+}
+
+// SiteFieldsRequest is the query payload for GET /api/sites/view/{site_id}/fields.
+type SiteFieldsRequest struct {
+	FieldID *int64  `query:"field_id" json:"field_id"`
+	Type    *string `query:"type"     json:"type"`
+	Key     *string `query:"key"      json:"key"`
+	Label   *string `query:"label"    json:"label"`
+	SortBy  string  `query:"sort_by"  json:"sort_by"`
+	SortDir string  `query:"sort_dir" json:"sort_dir"`
+	Page    int     `query:"page"     json:"page"`
+	PerPage int     `query:"per_page" json:"per_page"`
+}
+
+// SiteEntryUpdatesRequest is the query payload for GET /api/sites/view/{site_id}/entry-updates.
+type SiteEntryUpdatesRequest struct {
+	EntryID *int64 `query:"entry_id" json:"entry_id"`
+	FieldID *int64 `query:"field_id" json:"field_id"`
+	UserID  *int64 `query:"user_id"  json:"user_id"`
+	SortBy  string `query:"sort_by"  json:"sort_by"`
+	SortDir string `query:"sort_dir" json:"sort_dir"`
+	Page    int    `query:"page"     json:"page"`
+	PerPage int    `query:"per_page" json:"per_page"`
+}
+
+// SiteEntryUpdateItem is the site-scoped variant of EntryUpdateItem that also exposes entry_id.
+type SiteEntryUpdateItem struct {
+	ID         int64      `json:"id"`
+	EntryID    *int64     `json:"entry_id"`
+	FieldID    int64      `json:"field_id"`
+	FieldKey   *string    `json:"field_key"`
+	FieldLabel *string    `json:"field_label"`
+	UpdateType *string    `json:"update_type"`
+	OldValue   *string    `json:"old_value"`
+	NewValue   *string    `json:"new_value"`
+	ChangeDate *time.Time `json:"change_date"`
+	CreatedAt  time.Time  `json:"created_at"`
+}

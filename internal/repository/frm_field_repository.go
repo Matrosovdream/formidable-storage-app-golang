@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/entity"
 	"github.com/jmoiron/sqlx"
@@ -74,4 +76,61 @@ func (r *FrmFieldRepository) UpsertMany(ctx context.Context, qu Querier, siteID 
 		}
 	}
 	return nil
+}
+
+// List performs filter/sort/pagination over frm_fields scoped to siteID.
+// Filter keys (whitelisted): field_id, type (=); key, label (ILIKE).
+// Sort whitelist: id, field_id, key, type, label, created_at, updated_at.
+func (r *FrmFieldRepository) List(ctx context.Context, qu Querier, siteID int64, p ListParams) (ListResult[entity.FrmField], error) {
+	p.Normalize(25, 200)
+
+	where := []string{"site_id = $1"}
+	args := []any{siteID}
+	pos := 2
+
+	likeKeys := map[string]bool{"key": true, "label": true}
+	eqKeys := map[string]bool{"field_id": true, "type": true}
+
+	for k, v := range p.Filters {
+		switch {
+		case eqKeys[k]:
+			where = append(where, fmt.Sprintf("%s = $%d", k, pos))
+			args = append(args, v)
+			pos++
+		case likeKeys[k]:
+			where = append(where, fmt.Sprintf("%s ILIKE $%d", k, pos))
+			args = append(args, "%"+toString(v)+"%")
+			pos++
+		}
+	}
+
+	sortCol := "id"
+	switch p.SortBy {
+	case "id", "field_id", "key", "type", "label", "created_at", "updated_at":
+		sortCol = p.SortBy
+	}
+
+	whereSQL := strings.Join(where, " AND ")
+
+	var total int64
+	if err := r.q(qu).GetContext(ctx, &total, "SELECT COUNT(*) FROM frm_fields WHERE "+whereSQL, args...); err != nil {
+		return ListResult[entity.FrmField]{}, err
+	}
+
+	listArgs := append(args, p.PerPage, p.Offset())
+	stmt := fmt.Sprintf(
+		"SELECT %s FROM frm_fields WHERE %s ORDER BY %s %s LIMIT $%d OFFSET $%d",
+		frmFieldColumns, whereSQL, sortCol, p.SortDir, pos, pos+1,
+	)
+
+	var data []entity.FrmField
+	if err := r.q(qu).SelectContext(ctx, &data, stmt, listArgs...); err != nil {
+		return ListResult[entity.FrmField]{}, err
+	}
+
+	last := int((total + int64(p.PerPage) - 1) / int64(p.PerPage))
+	if last < 1 {
+		last = 1
+	}
+	return ListResult[entity.FrmField]{Data: data, Total: total, Page: p.Page, PerPage: p.PerPage, LastPage: last}, nil
 }

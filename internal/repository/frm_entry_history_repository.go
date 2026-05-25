@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -75,5 +76,66 @@ func (r *FrmEntryHistoryRepository) FindByEntry(ctx context.Context, qu Querier,
 		return nil, err
 	}
 	return out, nil
+}
+
+// List performs filter/sort/pagination over frm_entry_history scoped to siteID.
+// Filter keys (whitelisted): entry_id, field_id, user_id, update_type_id (=);
+// change_date_from, change_date_to (range).
+// Sort whitelist: id, entry_id, field_id, change_date, created_at.
+func (r *FrmEntryHistoryRepository) List(ctx context.Context, qu Querier, siteID int64, p ListParams) (ListResult[entity.FrmEntryHistory], error) {
+	p.Normalize(25, 200)
+
+	where := []string{"site_id = $1"}
+	args := []any{siteID}
+	pos := 2
+
+	eqKeys := map[string]bool{"entry_id": true, "field_id": true, "user_id": true, "update_type_id": true}
+
+	for k, v := range p.Filters {
+		switch {
+		case eqKeys[k]:
+			where = append(where, fmt.Sprintf("%s = $%d", k, pos))
+			args = append(args, v)
+			pos++
+		case k == "change_date_from":
+			where = append(where, fmt.Sprintf("change_date >= $%d", pos))
+			args = append(args, v)
+			pos++
+		case k == "change_date_to":
+			where = append(where, fmt.Sprintf("change_date <= $%d", pos))
+			args = append(args, v)
+			pos++
+		}
+	}
+
+	sortCol := "id"
+	switch p.SortBy {
+	case "id", "entry_id", "field_id", "change_date", "created_at":
+		sortCol = p.SortBy
+	}
+
+	whereSQL := strings.Join(where, " AND ")
+
+	var total int64
+	if err := r.q(qu).GetContext(ctx, &total, "SELECT COUNT(*) FROM frm_entry_history WHERE "+whereSQL, args...); err != nil {
+		return ListResult[entity.FrmEntryHistory]{}, err
+	}
+
+	listArgs := append(args, p.PerPage, p.Offset())
+	stmt := fmt.Sprintf(
+		"SELECT %s FROM frm_entry_history WHERE %s ORDER BY %s %s LIMIT $%d OFFSET $%d",
+		frmEntryHistoryColumns, whereSQL, sortCol, p.SortDir, pos, pos+1,
+	)
+
+	var data []entity.FrmEntryHistory
+	if err := r.q(qu).SelectContext(ctx, &data, stmt, listArgs...); err != nil {
+		return ListResult[entity.FrmEntryHistory]{}, err
+	}
+
+	last := int((total + int64(p.PerPage) - 1) / int64(p.PerPage))
+	if last < 1 {
+		last = 1
+	}
+	return ListResult[entity.FrmEntryHistory]{Data: data, Total: total, Page: p.Page, PerPage: p.PerPage, LastPage: last}, nil
 }
 
