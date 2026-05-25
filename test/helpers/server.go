@@ -47,7 +47,8 @@ func NewTestServer(t *testing.T) *TestServer {
 
 	ctrl := route.Controllers{
 		Auth:                    apphttp.NewAuthController(deps.Auth),
-		Site:                    apphttp.NewSiteController(deps.Site),
+		Site:                    apphttp.NewSiteController(deps.Site, deps.FrmEmailLogUC, deps.FrmField, deps.FrmEntryHistoryUC),
+		SiteGenerate:            apphttp.NewSiteGenerateController(deps.SiteGenerate),
 		Data:                    apphttp.NewDataController(deps.Data),
 		RestV1EntryHistory:      apphttp.NewRestV1EntryHistoryController(deps.FrmEntryHistoryUC, deps.QueueProducer),
 		RestV1Fields:            apphttp.NewRestV1FieldsController(deps.QueueProducer),
