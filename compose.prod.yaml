@@ -1,5 +1,6 @@
 # Prod stack: built images, no source mount, healthchecks + restart policies,
-# DB/Redis ports NOT exposed to the host.
+# DB/Redis ports NOT exposed to the host. HTTP routing handled by Traefik
+# (external `traefik-network` must already exist on the host).
 #
 # Usage:
 #   docker compose -f compose.prod.yaml --env-file .env.prod up -d --build
@@ -17,6 +18,8 @@ services:
       POSTGRES_DB: ${DB_DATABASE}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - fsa-production
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}"]
       interval: 10s
@@ -29,6 +32,8 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redisdata:/data
+    networks:
+      - fsa-production
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -41,6 +46,8 @@ services:
       postgres: { condition: service_healthy }
     volumes:
       - ./db/migrations:/migrations
+    networks:
+      - fsa-production
     command:
       - "-path=/migrations"
       - "-database=postgres://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE}?sslmode=disable"
@@ -59,18 +66,22 @@ services:
     environment:
       DB_HOST: postgres
       REDIS_HOST: redis
-    ports:
-      - "8080:8080"
+    networks:
+      - fsa-production
+      - traefik-network
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
       migrate:  { condition: service_completed_successfully }
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-network"
+      - "traefik.http.routers.fsa-web.rule=Host(`${APP_DOMAIN}`)"
+      - "traefik.http.routers.fsa-web.entrypoints=websecure"
+      - "traefik.http.routers.fsa-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.fsa-web.loadbalancer.server.port=8080"
+      - "traefik.http.services.fsa-web.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.fsa-web.loadbalancer.healthcheck.interval=30s"
 
   worker:
     build:
@@ -84,10 +95,18 @@ services:
     environment:
       DB_HOST: postgres
       REDIS_HOST: redis
+    networks:
+      - fsa-production
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
       migrate:  { condition: service_completed_successfully }
+
+networks:
+  fsa-production:
+    driver: bridge
+  traefik-network:
+    external: true
 
 volumes:
   pgdata:
