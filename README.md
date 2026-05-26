@@ -158,6 +158,47 @@ docker compose -f compose.prod.yaml run --rm migrate \
 
 ---
 
+## Logging in as admin
+
+After running `make seed`, a superadmin account exists with credentials
+hard-coded in [cmd/seed/seeds/admin.json](cmd/seed/seeds/admin.json):
+
+- **Email:** `admin@admin.com`
+- **Password:** `123123`
+
+Get a bearer token via the login endpoint, then use it for every
+Sanctum-protected `/api/*` call:
+
+```bash
+# Dev
+curl -X POST http://localhost:8080/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@admin.com","password":"123123"}'
+
+# Prod
+curl -X POST https://frm-storage-go.devflip.io/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@admin.com","password":"123123"}'
+```
+
+The response contains a `token` field shaped `<id>|<plaintext>`. Send it
+back as a bearer token:
+
+```bash
+curl https://frm-storage-go.devflip.io/api/user \
+  -H 'Authorization: Bearer <id>|<plaintext>'
+```
+
+The SPA at `https://frm-storage-front.devflip.io/login` POSTs to the same
+endpoint and stores the returned token.
+
+**Change the password before going public.** Edit `password` in
+`cmd/seed/seeds/admin.json`, then `make seed-rebuild && make seed` (prod)
+or just `make seed` (dev). The seeder is idempotent on email, so it will
+update the existing row in place.
+
+---
+
 ## Configuration
 
 All runtime config comes from `.env` (loaded by viper). Full list of
