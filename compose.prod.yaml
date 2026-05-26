@@ -102,6 +102,26 @@ services:
       redis:    { condition: service_healthy }
       migrate:  { condition: service_completed_successfully }
 
+  # One-shot: `docker compose -f compose.prod.yaml --profile seed run --rm seed`
+  seed:
+    profiles: ["seed"]
+    build:
+      context: .
+      target: runtime
+      args:
+        BIN: seed
+    image: fsa/seed:latest
+    env_file: [.env]
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    networks:
+      - fsa-production
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate:  { condition: service_completed_successfully }
+    restart: "no"
+
 networks:
   fsa-production:
     driver: bridge

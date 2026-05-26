@@ -84,6 +84,29 @@ services:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
 
+  # One-shot: invoked via `make seed`. Reuses the dev image (source-mounted) and
+  # runs the seed binary with `go run` so edits to cmd/seed take effect without
+  # rebuilding.
+  seed:
+    profiles: ["seed"]
+    build:
+      context: .
+      target: dev
+    env_file: [.env]
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    volumes:
+      - ./:/src
+      - gocache:/root/.cache/go-build
+      - gomod:/go/pkg/mod
+    networks:
+      - default
+    depends_on:
+      postgres: { condition: service_healthy }
+    entrypoint: ["go", "run", "./cmd/seed"]
+    restart: "no"
+
 volumes:
   pgdata:
   redisdata:
