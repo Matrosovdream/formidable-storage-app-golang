@@ -7,17 +7,23 @@ import (
 	"encoding/hex"
 	"fmt"
 	mrand "math/rand/v2"
+	"runtime"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/Matrosovdream/formidable-storage-app-golang/internal/entity"
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/model"
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/repository"
+	"golang.org/x/sync/errgroup"
 )
 
 // SiteGenerateUseCase produces dummy email/field/entry-update rows for a site,
 // inserts them into the DB, and reports the wall-clock cost of each phase.
 //
-// It is intended for load testing and demo seeding from the Sanctum-protected
-// /api/sites/generate/* endpoints — not for production traffic.
+// Both phases (in-memory generation and DB insertion) can run concurrently
+// across goroutines when the caller passes concurrent=true. The toggle is
+// intentionally exposed so calls can be benchmarked side-by-side.
 type SiteGenerateUseCase struct {
 	sites       *repository.SiteRepository
 	emails      *repository.FrmEmailLogRepository
@@ -43,10 +49,11 @@ func NewSiteGenerateUseCase(
 }
 
 const (
-	genDefaultAmount     = 10
-	genMaxAmount         = 10000
-	genDefaultEmailLen   = 200
-	genMaxEmailLen       = 100000
+	genDefaultAmount   = 10
+	genMaxAmount       = 10000
+	genDefaultEmailLen = 200
+	genMaxEmailLen     = 100000
+	genMaxWorkers      = 8
 )
 
 func clampAmount(n int) int {
@@ -87,6 +94,81 @@ func randHex(n int) string {
 	buf := make([]byte, n)
 	_, _ = rand.Read(buf)
 	return hex.EncodeToString(buf)
+}
+
+// randHexR is the hot-path variant of randHex that reuses a worker's PCG
+// instead of paying the per-call crypto/rand cost. Output is fake-data quality
+// — do not use for security-sensitive randomness.
+func randHexR(r *mrand.Rand, n int) string {
+	buf := make([]byte, n)
+	for i := 0; i < n; i++ {
+		buf[i] = byte(r.UintN(256))
+	}
+	return hex.EncodeToString(buf)
+}
+
+// numWorkers caps the worker pool at GOMAXPROCS (and at most genMaxWorkers),
+// but never exceeds the number of items to process.
+func numWorkers(amount int) int {
+	w := runtime.GOMAXPROCS(0)
+	if w > genMaxWorkers {
+		w = genMaxWorkers
+	}
+	if w > amount {
+		w = amount
+	}
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// partition splits the half-open range [0, total) into n contiguous sub-ranges.
+func partition(total, n int) [][2]int {
+	if n < 1 {
+		n = 1
+	}
+	parts := make([][2]int, 0, n)
+	base := total / n
+	extra := total % n
+	start := 0
+	for i := 0; i < n; i++ {
+		size := base
+		if i < extra {
+			size++
+		}
+		parts = append(parts, [2]int{start, start + size})
+		start += size
+	}
+	return parts
+}
+
+// runFill dispatches `fill` across worker goroutines if concurrent, otherwise
+// runs it once on the full range. Each invocation gets its own PCG.
+func runFill(amount int, concurrent bool, fill func(r *mrand.Rand, start, end int)) int {
+	if !concurrent {
+		fill(newRNG(), 0, amount)
+		return 1
+	}
+	n := numWorkers(amount)
+	if n < 2 {
+		fill(newRNG(), 0, amount)
+		return 1
+	}
+	var wg sync.WaitGroup
+	for _, p := range partition(amount, n) {
+		if p[0] == p[1] {
+			continue
+		}
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fill(newRNG(), p[0], p[1])
+		}()
+	}
+	wg.Wait()
+	return n
 }
 
 func (u *SiteGenerateUseCase) ensureSite(ctx context.Context, siteID int64) error {
@@ -142,22 +224,27 @@ func randHTML(r *mrand.Rand, targetLen int) string {
 		return ""
 	}
 	const open = "<html><body>"
-	const close = "</body></html>"
-	inner := targetLen - len(open) - len(close)
+	const closeTag = "</body></html>"
+	inner := targetLen - len(open) - len(closeTag)
 	if inner < 0 {
 		inner = targetLen
 	}
-	var body string
+	var b strings.Builder
+	b.Grow(targetLen)
+	b.WriteString(open)
 	remaining := inner
 	for remaining > 0 {
 		chunk := 60 + r.IntN(120)
 		if chunk > remaining {
 			chunk = remaining
 		}
-		body += "<p>" + randWords(r, chunk-7) + "</p>"
+		b.WriteString("<p>")
+		b.WriteString(randWords(r, chunk-7))
+		b.WriteString("</p>")
 		remaining -= chunk
 	}
-	out := open + body + close
+	b.WriteString(closeTag)
+	out := b.String()
 	if len(out) > targetLen {
 		out = out[:targetLen]
 	}
@@ -166,7 +253,8 @@ func randHTML(r *mrand.Rand, targetLen int) string {
 
 // GenerateEmails creates `amount` dummy email-log rows with content of roughly
 // `length` characters (plain + HTML) and bulk-inserts them via the repository.
-func (u *SiteGenerateUseCase) GenerateEmails(ctx context.Context, siteID int64, amount, length int) (model.GenerateResponse, error) {
+// When `concurrent` is true, both phases fan out across a worker pool.
+func (u *SiteGenerateUseCase) GenerateEmails(ctx context.Context, siteID int64, amount, length int, concurrent bool) (model.GenerateResponse, error) {
 	if err := u.ensureSite(ctx, siteID); err != nil {
 		return model.GenerateResponse{}, err
 	}
@@ -174,54 +262,83 @@ func (u *SiteGenerateUseCase) GenerateEmails(ctx context.Context, siteID int64, 
 	length = clampEmailLength(length)
 
 	genStart := time.Now()
-	r := newRNG()
+	rows := make([]repository.FrmEmailLogInput, amount)
 	nowNano := time.Now().UnixNano()
-	rows := make([]repository.FrmEmailLogInput, 0, amount)
-	for i := 0; i < amount; i++ {
-		plain := randWords(r, length)
-		html := randHTML(r, length)
-		subject := fmt.Sprintf("%s #%d", emailSubjects[r.IntN(len(emailSubjects))], r.IntN(1_000_000))
-		from := fmt.Sprintf("from_%s@%s", randHex(4), emailDomains[r.IntN(len(emailDomains))])
-		to := fmt.Sprintf("to_%s@%s", randHex(4), emailDomains[r.IntN(len(emailDomains))])
-		mailer := emailMailers[r.IntN(len(emailMailers))]
-		msgID := fmt.Sprintf("gen-%d-%d-%s", nowNano, i, randHex(6))
-		sent := time.Now().UTC().Add(-time.Duration(r.IntN(72)) * time.Hour)
-		rows = append(rows, repository.FrmEmailLogInput{
-			EntryID:       sql.NullInt64{Int64: int64(9000 + r.IntN(1000)), Valid: true},
-			FormID:        sql.NullInt64{Int64: int64(1 + r.IntN(20)), Valid: true},
-			Subject:       sql.NullString{String: subject, Valid: true},
-			MessageID:     sql.NullString{String: msgID, Valid: true},
-			EmailFrom:     sql.NullString{String: from, Valid: true},
-			EmailTo:       sql.NullString{String: to, Valid: true},
-			ContentPlain:  sql.NullString{String: plain, Valid: true},
-			ContentHTML:   sql.NullString{String: html, Valid: true},
-			Status:        int16(r.IntN(3)),
-			DateSent:      sql.NullTime{Time: sent, Valid: true},
-			Mailer:        sql.NullString{String: mailer, Valid: true},
-			Attachments:   int16(r.IntN(3)),
-			InitiatorName: sql.NullString{String: "generator", Valid: true},
-		})
+
+	fill := func(r *mrand.Rand, start, end int) {
+		for i := start; i < end; i++ {
+			plain := randWords(r, length)
+			html := randHTML(r, length)
+			subject := fmt.Sprintf("%s #%d", emailSubjects[r.IntN(len(emailSubjects))], r.IntN(1_000_000))
+			from := fmt.Sprintf("from_%s@%s", randHexR(r, 4), emailDomains[r.IntN(len(emailDomains))])
+			to := fmt.Sprintf("to_%s@%s", randHexR(r, 4), emailDomains[r.IntN(len(emailDomains))])
+			mailer := emailMailers[r.IntN(len(emailMailers))]
+			msgID := fmt.Sprintf("gen-%d-%d-%s", nowNano, i, randHexR(r, 6))
+			sent := time.Now().UTC().Add(-time.Duration(r.IntN(72)) * time.Hour)
+			rows[i] = repository.FrmEmailLogInput{
+				EntryID:       sql.NullInt64{Int64: int64(9000 + r.IntN(1000)), Valid: true},
+				FormID:        sql.NullInt64{Int64: int64(1 + r.IntN(20)), Valid: true},
+				Subject:       sql.NullString{String: subject, Valid: true},
+				MessageID:     sql.NullString{String: msgID, Valid: true},
+				EmailFrom:     sql.NullString{String: from, Valid: true},
+				EmailTo:       sql.NullString{String: to, Valid: true},
+				ContentPlain:  sql.NullString{String: plain, Valid: true},
+				ContentHTML:   sql.NullString{String: html, Valid: true},
+				Status:        int16(r.IntN(3)),
+				DateSent:      sql.NullTime{Time: sent, Valid: true},
+				Mailer:        sql.NullString{String: mailer, Valid: true},
+				Attachments:   int16(r.IntN(3)),
+				InitiatorName: sql.NullString{String: "generator", Valid: true},
+			}
+		}
 	}
+	workers := runFill(amount, concurrent, fill)
 	genDur := time.Since(genStart)
 
 	insStart := time.Now()
-	if err := u.emails.UpsertMany(ctx, nil, siteID, rows); err != nil {
+	if err := u.insertEmails(ctx, siteID, rows, concurrent); err != nil {
 		return model.GenerateResponse{}, err
 	}
 	insDur := time.Since(insStart)
 
 	return model.GenerateResponse{
-		Success: true,
-		Kind:    "emails",
-		SiteID:  siteID,
-		Count:   len(rows),
-		Length:  length,
+		Success:    true,
+		Kind:       "emails",
+		SiteID:     siteID,
+		Count:      len(rows),
+		Length:     length,
+		Concurrent: concurrent,
+		Workers:    workers,
 		Timings: model.GenerateTimings{
 			GenerationMs: msFloat(genDur),
 			InsertionMs:  msFloat(insDur),
 			TotalMs:      msFloat(genDur + insDur),
 		},
 	}, nil
+}
+
+func (u *SiteGenerateUseCase) insertEmails(ctx context.Context, siteID int64, rows []repository.FrmEmailLogInput, concurrent bool) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if !concurrent {
+		return u.emails.UpsertMany(ctx, nil, siteID, rows)
+	}
+	n := numWorkers(len(rows))
+	if n < 2 {
+		return u.emails.UpsertMany(ctx, nil, siteID, rows)
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	for _, p := range partition(len(rows), n) {
+		if p[0] == p[1] {
+			continue
+		}
+		p := p
+		g.Go(func() error {
+			return u.emails.UpsertMany(gctx, nil, siteID, rows[p[0]:p[1]])
+		})
+	}
+	return g.Wait()
 }
 
 // -------------------------------------------------------------------------
@@ -232,47 +349,77 @@ var fieldTypes = []string{"text", "email", "tel", "textarea", "number", "select"
 
 // GenerateFields creates `amount` dummy field rows with timestamp-derived field_ids
 // (so they don't collide with seeded fields) and upserts them via the repository.
-func (u *SiteGenerateUseCase) GenerateFields(ctx context.Context, siteID int64, amount int) (model.GenerateResponse, error) {
+// When `concurrent` is true, both phases fan out across a worker pool.
+func (u *SiteGenerateUseCase) GenerateFields(ctx context.Context, siteID int64, amount int, concurrent bool) (model.GenerateResponse, error) {
 	if err := u.ensureSite(ctx, siteID); err != nil {
 		return model.GenerateResponse{}, err
 	}
 	amount = clampAmount(amount)
 
 	genStart := time.Now()
-	r := newRNG()
 	base := time.Now().UnixNano() % 1_000_000_000
-	rows := make([]repository.FrmFieldInput, 0, amount)
-	for i := 0; i < amount; i++ {
-		fid := base + int64(i)
-		typ := fieldTypes[r.IntN(len(fieldTypes))]
-		key := fmt.Sprintf("gen_field_%d_%s", fid, randHex(3))
-		label := fmt.Sprintf("Generated %s field #%d", typ, fid)
-		rows = append(rows, repository.FrmFieldInput{
-			FieldID: fid,
-			Key:     key,
-			Type:    typ,
-			Label:   label,
-		})
+	rows := make([]repository.FrmFieldInput, amount)
+
+	fill := func(r *mrand.Rand, start, end int) {
+		for i := start; i < end; i++ {
+			fid := base + int64(i)
+			typ := fieldTypes[r.IntN(len(fieldTypes))]
+			key := fmt.Sprintf("gen_field_%d_%s", fid, randHexR(r, 3))
+			label := fmt.Sprintf("Generated %s field #%d", typ, fid)
+			rows[i] = repository.FrmFieldInput{
+				FieldID: fid,
+				Key:     key,
+				Type:    typ,
+				Label:   label,
+			}
+		}
 	}
+	workers := runFill(amount, concurrent, fill)
 	genDur := time.Since(genStart)
 
 	insStart := time.Now()
-	if err := u.fields.UpsertMany(ctx, nil, siteID, rows); err != nil {
+	if err := u.insertFields(ctx, siteID, rows, concurrent); err != nil {
 		return model.GenerateResponse{}, err
 	}
 	insDur := time.Since(insStart)
 
 	return model.GenerateResponse{
-		Success: true,
-		Kind:    "fields",
-		SiteID:  siteID,
-		Count:   len(rows),
+		Success:    true,
+		Kind:       "fields",
+		SiteID:     siteID,
+		Count:      len(rows),
+		Concurrent: concurrent,
+		Workers:    workers,
 		Timings: model.GenerateTimings{
 			GenerationMs: msFloat(genDur),
 			InsertionMs:  msFloat(insDur),
 			TotalMs:      msFloat(genDur + insDur),
 		},
 	}, nil
+}
+
+func (u *SiteGenerateUseCase) insertFields(ctx context.Context, siteID int64, rows []repository.FrmFieldInput, concurrent bool) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if !concurrent {
+		return u.fields.UpsertMany(ctx, nil, siteID, rows)
+	}
+	n := numWorkers(len(rows))
+	if n < 2 {
+		return u.fields.UpsertMany(ctx, nil, siteID, rows)
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	for _, p := range partition(len(rows), n) {
+		if p[0] == p[1] {
+			continue
+		}
+		p := p
+		g.Go(func() error {
+			return u.fields.UpsertMany(gctx, nil, siteID, rows[p[0]:p[1]])
+		})
+	}
+	return g.Wait()
 }
 
 // -------------------------------------------------------------------------
@@ -284,8 +431,9 @@ func (u *SiteGenerateUseCase) GenerateFields(ctx context.Context, siteID int64, 
 // placeholder field is created first.
 //
 // Note: the prep reads (existing fields + update types) are counted under
-// generation time, since they happen before the bulk INSERT.
-func (u *SiteGenerateUseCase) GenerateEntryUpdates(ctx context.Context, siteID int64, amount int) (model.GenerateResponse, error) {
+// generation time, since they happen before the bulk INSERT. When concurrent
+// is true, those two reads also run in parallel.
+func (u *SiteGenerateUseCase) GenerateEntryUpdates(ctx context.Context, siteID int64, amount int, concurrent bool) (model.GenerateResponse, error) {
 	if err := u.ensureSite(ctx, siteID); err != nil {
 		return model.GenerateResponse{}, err
 	}
@@ -293,7 +441,7 @@ func (u *SiteGenerateUseCase) GenerateEntryUpdates(ctx context.Context, siteID i
 
 	genStart := time.Now()
 
-	siteFields, err := u.fields.FindBySite(ctx, nil, siteID)
+	siteFields, types, err := u.loadFieldsAndTypes(ctx, siteID, concurrent)
 	if err != nil {
 		return model.GenerateResponse{}, err
 	}
@@ -314,48 +462,108 @@ func (u *SiteGenerateUseCase) GenerateEntryUpdates(ctx context.Context, siteID i
 		}
 	}
 
-	types, err := u.updateTypes.FindAll(ctx, nil)
-	if err != nil {
-		return model.GenerateResponse{}, err
-	}
-
-	r := newRNG()
-	rows := make([]repository.FrmEntryHistoryInput, 0, amount)
-	for i := 0; i < amount; i++ {
-		f := siteFields[r.IntN(len(siteFields))]
-		oldV := sql.NullString{String: fmt.Sprintf("old-%s", randHex(4)), Valid: true}
-		newV := sql.NullString{String: fmt.Sprintf("new-%s", randHex(4)), Valid: true}
-		changeAt := time.Now().UTC().Add(-time.Duration(r.IntN(168)) * time.Hour)
-		var typeID sql.NullInt64
-		if len(types) > 0 {
-			typeID = sql.NullInt64{Int64: types[r.IntN(len(types))].ID, Valid: true}
+	rows := make([]repository.FrmEntryHistoryInput, amount)
+	fill := func(r *mrand.Rand, start, end int) {
+		for i := start; i < end; i++ {
+			f := siteFields[r.IntN(len(siteFields))]
+			oldV := sql.NullString{String: fmt.Sprintf("old-%s", randHexR(r, 4)), Valid: true}
+			newV := sql.NullString{String: fmt.Sprintf("new-%s", randHexR(r, 4)), Valid: true}
+			changeAt := time.Now().UTC().Add(-time.Duration(r.IntN(168)) * time.Hour)
+			var typeID sql.NullInt64
+			if len(types) > 0 {
+				typeID = sql.NullInt64{Int64: types[r.IntN(len(types))].ID, Valid: true}
+			}
+			rows[i] = repository.FrmEntryHistoryInput{
+				EntryID:      sql.NullInt64{Int64: int64(9000 + r.IntN(1000)), Valid: true},
+				FieldID:      f.ID,
+				UpdateTypeID: typeID,
+				OldValue:     oldV,
+				NewValue:     newV,
+				ChangeDate:   sql.NullTime{Time: changeAt, Valid: true},
+			}
 		}
-		rows = append(rows, repository.FrmEntryHistoryInput{
-			EntryID:      sql.NullInt64{Int64: int64(9000 + r.IntN(1000)), Valid: true},
-			FieldID:      f.ID,
-			UpdateTypeID: typeID,
-			OldValue:     oldV,
-			NewValue:     newV,
-			ChangeDate:   sql.NullTime{Time: changeAt, Valid: true},
-		})
 	}
+	workers := runFill(amount, concurrent, fill)
 	genDur := time.Since(genStart)
 
 	insStart := time.Now()
-	if err := u.history.InsertMany(ctx, nil, siteID, rows); err != nil {
+	if err := u.insertHistory(ctx, siteID, rows, concurrent); err != nil {
 		return model.GenerateResponse{}, err
 	}
 	insDur := time.Since(insStart)
 
 	return model.GenerateResponse{
-		Success: true,
-		Kind:    "entry_updates",
-		SiteID:  siteID,
-		Count:   len(rows),
+		Success:    true,
+		Kind:       "entry_updates",
+		SiteID:     siteID,
+		Count:      len(rows),
+		Concurrent: concurrent,
+		Workers:    workers,
 		Timings: model.GenerateTimings{
 			GenerationMs: msFloat(genDur),
 			InsertionMs:  msFloat(insDur),
 			TotalMs:      msFloat(genDur + insDur),
 		},
 	}, nil
+}
+
+// loadFieldsAndTypes runs the two pre-read queries serially or in parallel
+// depending on the toggle.
+func (u *SiteGenerateUseCase) loadFieldsAndTypes(ctx context.Context, siteID int64, concurrent bool) (siteFields []entity.FrmField, types []entity.FrmEntryUpdateType, err error) {
+	if !concurrent {
+		sf, ferr := u.fields.FindBySite(ctx, nil, siteID)
+		if ferr != nil {
+			return nil, nil, ferr
+		}
+		ts, terr := u.updateTypes.FindAll(ctx, nil)
+		if terr != nil {
+			return nil, nil, terr
+		}
+		return sf, ts, nil
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		sf, ferr := u.fields.FindBySite(gctx, nil, siteID)
+		if ferr != nil {
+			return ferr
+		}
+		siteFields = sf
+		return nil
+	})
+	g.Go(func() error {
+		ts, terr := u.updateTypes.FindAll(gctx, nil)
+		if terr != nil {
+			return terr
+		}
+		types = ts
+		return nil
+	})
+	if werr := g.Wait(); werr != nil {
+		return nil, nil, werr
+	}
+	return siteFields, types, nil
+}
+
+func (u *SiteGenerateUseCase) insertHistory(ctx context.Context, siteID int64, rows []repository.FrmEntryHistoryInput, concurrent bool) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if !concurrent {
+		return u.history.InsertMany(ctx, nil, siteID, rows)
+	}
+	n := numWorkers(len(rows))
+	if n < 2 {
+		return u.history.InsertMany(ctx, nil, siteID, rows)
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	for _, p := range partition(len(rows), n) {
+		if p[0] == p[1] {
+			continue
+		}
+		p := p
+		g.Go(func() error {
+			return u.history.InsertMany(gctx, nil, siteID, rows[p[0]:p[1]])
+		})
+	}
+	return g.Wait()
 }

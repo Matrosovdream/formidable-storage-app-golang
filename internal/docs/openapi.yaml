@@ -422,7 +422,9 @@ paths:
         mailer, status and `date_sent`, then bulk-upserts them by `(site_id, message_id)`.
 
         Both the in-memory generation phase and the DB-insertion phase are timed
-        independently and returned in the response.
+        independently and returned in the response. When `concurrent=1` is passed,
+        both phases fan out across a worker pool (capped at GOMAXPROCS or 8) —
+        the number of workers actually used is echoed back as `workers`.
       security: [{ bearerAuth: [] }]
       parameters:
         - $ref: '#/components/parameters/SiteIdPath'
@@ -434,6 +436,7 @@ paths:
           name: length
           schema: { type: integer, minimum: 1, maximum: 100000, default: 200 }
           description: Approximate character length of each email's `content_plain` and `content_html` body.
+        - $ref: '#/components/parameters/ConcurrentQuery'
       responses:
         '200':
           description: Rows generated and inserted
@@ -446,10 +449,12 @@ paths:
                 site_id: 1
                 count: 100
                 length: 200
+                concurrent: true
+                workers: 8
                 timings:
-                  generation_ms: 6.412
-                  insertion_ms: 48.117
-                  total_ms: 54.529
+                  generation_ms: 1.834
+                  insertion_ms: 12.604
+                  total_ms: 14.438
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -459,8 +464,11 @@ paths:
       summary: Generate N dummy field rows for a site
       description: |
         Builds `amount` `frm_fields` rows with timestamp-derived `field_id`s, random
-        key/type/label, and upserts them via `(site_id, field_id)`. Reports both
-        generation and DB-insertion wall-clock cost.
+        key/type/label, and upserts them via `(site_id, field_id)` using a single
+        batched `INSERT … ON CONFLICT` per chunk (backed by the partial unique index
+        `frm_fields_site_field_uidx`). Reports both generation and DB-insertion
+        wall-clock cost. When `concurrent=1`, both phases fan out across a worker
+        pool and `workers` echoes the count used.
       security: [{ bearerAuth: [] }]
       parameters:
         - $ref: '#/components/parameters/SiteIdPath'
@@ -468,6 +476,7 @@ paths:
           name: amount
           schema: { type: integer, minimum: 1, maximum: 10000, default: 10 }
           description: How many rows to generate. Defaults to 10, capped at 10000.
+        - $ref: '#/components/parameters/ConcurrentQuery'
       responses:
         '200':
           description: Rows generated and inserted
@@ -479,10 +488,12 @@ paths:
                 kind: fields
                 site_id: 1
                 count: 50
+                concurrent: true
+                workers: 4
                 timings:
-                  generation_ms: 0.881
-                  insertion_ms: 124.502
-                  total_ms: 125.383
+                  generation_ms: 0.412
+                  insertion_ms: 18.221
+                  total_ms: 18.633
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -497,7 +508,9 @@ paths:
         (when any are seeded). Reports both generation and DB-insertion timings.
 
         The generation phase counts the prep reads (existing fields + update-type
-        lookup) since they happen before the bulk INSERT.
+        lookup) since they happen before the bulk INSERT. When `concurrent=1`,
+        those two prep reads run in parallel, the row-build loop is split across
+        workers, and the INSERT is partitioned across goroutines.
       security: [{ bearerAuth: [] }]
       parameters:
         - $ref: '#/components/parameters/SiteIdPath'
@@ -505,6 +518,7 @@ paths:
           name: amount
           schema: { type: integer, minimum: 1, maximum: 10000, default: 10 }
           description: How many rows to generate. Defaults to 10, capped at 10000.
+        - $ref: '#/components/parameters/ConcurrentQuery'
       responses:
         '200':
           description: Rows generated and inserted
@@ -516,10 +530,12 @@ paths:
                 kind: entry_updates
                 site_id: 1
                 count: 200
+                concurrent: true
+                workers: 8
                 timings:
-                  generation_ms: 3.122
-                  insertion_ms: 71.998
-                  total_ms: 75.120
+                  generation_ms: 0.918
+                  insertion_ms: 21.402
+                  total_ms: 22.320
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -809,6 +825,19 @@ components:
       name: entry_id
       required: true
       schema: { type: integer, format: int64 }
+    ConcurrentQuery:
+      in: query
+      name: concurrent
+      required: false
+      schema:
+        type: string
+        enum: ["0", "1", "true", "false", "yes", "no", "on", "off"]
+        default: "0"
+      description: |
+        Toggle the goroutine-based fast path. Accepts `1`/`true`/`yes`/`on`
+        (case-sensitive) to enable; anything else (including absent) runs the
+        sequential path. Defaults to off so requests are directly comparable
+        with prior baselines.
 
   responses:
     Unauthorized:
@@ -1002,7 +1031,7 @@ components:
 
     GenerateResponse:
       type: object
-      required: [success, kind, site_id, count, timings]
+      required: [success, kind, site_id, count, concurrent, timings]
       properties:
         success: { type: boolean, example: true }
         kind:
@@ -1015,6 +1044,16 @@ components:
           type: integer
           nullable: true
           description: Echoed back only for the `emails` generator — the per-email content length used.
+        concurrent:
+          type: boolean
+          description: Whether the request ran with the concurrent worker-pool path. Echoes the `concurrent` query param.
+        workers:
+          type: integer
+          minimum: 1
+          description: |
+            Number of goroutines actually used. Always `1` for the sequential
+            path (`concurrent=false`). For the concurrent path, capped at
+            `min(GOMAXPROCS, 8, amount)`.
         timings: { $ref: '#/components/schemas/GenerateTimings' }
 
     # ---------- Data ----------

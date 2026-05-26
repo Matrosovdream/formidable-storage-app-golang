@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Matrosovdream/formidable-storage-app-golang/internal/entity"
 	"github.com/jmoiron/sqlx"
@@ -43,36 +45,44 @@ type FrmFieldInput struct {
 	Label   string
 }
 
-// UpsertMany bulk-inserts fields scoped to siteID. Uses (site_id, field_id) as the natural key.
-// If (site_id, field_id) already exists, key/type/label are updated.
+// UpsertMany bulk-inserts fields scoped to siteID. Uses (site_id, field_id) as
+// the natural key. If (site_id, field_id) already exists, key/type/label are
+// updated.
 //
-// A partial unique index on (site_id, field_id) is required for this to use ON CONFLICT.
-// Since the migration does not include such an index, we run upsert by emulating it via a small
-// SELECT + UPDATE/INSERT inside the same transaction, in chunks of 200.
+// Relies on the partial unique index `frm_fields_site_field_uidx` introduced
+// in migration 0011. ON CONFLICT inference reuses that index, so the WHERE
+// clause must match the index predicate exactly.
 func (r *FrmFieldRepository) UpsertMany(ctx context.Context, qu Querier, siteID int64, inputs []FrmFieldInput) error {
 	if len(inputs) == 0 {
 		return nil
 	}
 	q := r.q(qu)
 	const chunk = 200
+	const cols = "field_id, site_id, key, type, label, created_at, updated_at"
+	const ncols = 7
+
 	for _, batch := range ChunkRows(inputs, chunk) {
+		args := make([]any, 0, len(batch)*ncols)
+		placeholders := make([]string, 0, len(batch))
+		pos := 1
+		now := time.Now().UTC()
 		for _, in := range batch {
-			res, err := q.ExecContext(ctx,
-				`UPDATE frm_fields SET key=$1, type=$2, label=$3, updated_at=NOW()
-				 WHERE site_id=$4 AND field_id=$5`,
-				in.Key, in.Type, in.Label, siteID, in.FieldID)
-			if err != nil {
-				return err
+			marks := make([]string, ncols)
+			for i := 0; i < ncols; i++ {
+				marks[i] = "$" + strconv.Itoa(pos)
+				pos++
 			}
-			affected, _ := res.RowsAffected()
-			if affected > 0 {
-				continue
-			}
-			if _, err := q.ExecContext(ctx,
-				`INSERT INTO frm_fields (field_id, site_id, key, type, label) VALUES ($1, $2, $3, $4, $5)`,
-				in.FieldID, siteID, in.Key, in.Type, in.Label); err != nil {
-				return err
-			}
+			placeholders = append(placeholders, "("+strings.Join(marks, ", ")+")")
+			args = append(args, in.FieldID, siteID, in.Key, in.Type, in.Label, now, now)
+		}
+		stmt := "INSERT INTO frm_fields (" + cols + ") VALUES " + strings.Join(placeholders, ", ") +
+			` ON CONFLICT (site_id, field_id) WHERE field_id IS NOT NULL DO UPDATE SET
+				key        = EXCLUDED.key,
+				type       = EXCLUDED.type,
+				label      = EXCLUDED.label,
+				updated_at = NOW()`
+		if _, err := q.ExecContext(ctx, stmt, args...); err != nil {
+			return err
 		}
 	}
 	return nil

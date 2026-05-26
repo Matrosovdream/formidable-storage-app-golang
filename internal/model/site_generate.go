@@ -10,10 +10,12 @@ type GenerateTimings struct {
 
 // GenerateResponse is the unified envelope returned by every /api/sites/generate/* endpoint.
 type GenerateResponse struct {
-	Success bool            `json:"success"`
-	Kind    string          `json:"kind"`
-	SiteID  int64           `json:"site_id"`
-	Count   int             `json:"count"`
-	Length  int             `json:"length,omitempty"`
-	Timings GenerateTimings `json:"timings"`
+	Success    bool            `json:"success"`
+	Kind       string          `json:"kind"`
+	SiteID     int64           `json:"site_id"`
+	Count      int             `json:"count"`
+	Length     int             `json:"length,omitempty"`
+	Concurrent bool            `json:"concurrent"`
+	Workers    int             `json:"workers,omitempty"`
+	Timings    GenerateTimings `json:"timings"`
 }

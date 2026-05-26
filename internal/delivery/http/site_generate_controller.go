@@ -35,12 +35,22 @@ func parseLength(c *fiber.Ctx) int {
 	return n
 }
 
+// parseConcurrent reads the `concurrent` query param. Accepts 1/true/yes/on.
+// Defaults to false so callers can A/B compare against the sequential path.
+func parseConcurrent(c *fiber.Ctx) bool {
+	switch c.Query("concurrent") {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func (h *SiteGenerateController) Emails(c *fiber.Ctx) error {
 	siteID, err := parseSiteID(c)
 	if err != nil {
 		return err
 	}
-	resp, err := h.gen.GenerateEmails(c.Context(), siteID, parseAmount(c), parseLength(c))
+	resp, err := h.gen.GenerateEmails(c.Context(), siteID, parseAmount(c), parseLength(c), parseConcurrent(c))
 	if err != nil {
 		return err
 	}
@@ -52,7 +62,7 @@ func (h *SiteGenerateController) Fields(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	resp, err := h.gen.GenerateFields(c.Context(), siteID, parseAmount(c))
+	resp, err := h.gen.GenerateFields(c.Context(), siteID, parseAmount(c), parseConcurrent(c))
 	if err != nil {
 		return err
 	}
@@ -64,7 +74,7 @@ func (h *SiteGenerateController) EntryUpdates(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	resp, err := h.gen.GenerateEntryUpdates(c.Context(), siteID, parseAmount(c))
+	resp, err := h.gen.GenerateEntryUpdates(c.Context(), siteID, parseAmount(c), parseConcurrent(c))
 	if err != nil {
 		return err
 	}
