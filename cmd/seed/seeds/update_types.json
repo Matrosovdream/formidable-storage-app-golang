@@ -1,0 +1,6 @@
+[
+  { "code": "created",  "title": "Created"  },
+  { "code": "updated",  "title": "Updated"  },
+  { "code": "deleted",  "title": "Deleted"  },
+  { "code": "imported", "title": "Imported" }
+]

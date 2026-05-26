@@ -9,6 +9,10 @@
 //   - frm_emails_log: a few rows of dummy email-log entries
 //   - frm_entry_history: a few history rows referencing the seeded fields
 //
+// All seed data lives under cmd/seed/seeds/*.json and is embedded into the
+// binary, so the command is self-contained and the data can be edited without
+// touching Go code.
+//
 // Re-running the command is safe: it upserts where possible and skips rows that
 // already match. The bearer token is rotated only if the site was newly created.
 package main
@@ -18,7 +22,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -29,36 +35,86 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const (
-	siteName = "Demo Site"
-	siteURL  = "https://demo.local/"
+// entryID is the synthetic entry the email and history fixtures reference.
+const entryID int64 = 9001
 
-	adminName     = "Super Admin"
-	adminEmail    = "admin@admin.com"
-	adminPassword = "123123"
-)
+//go:embed seeds/*.json
+var seedFS embed.FS
 
-var updateTypes = []struct{ code, title string }{
-	{"created", "Created"},
-	{"updated", "Updated"},
-	{"deleted", "Deleted"},
-	{"imported", "Imported"},
+type adminSeed struct {
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
-var fields = []struct {
-	fieldID int64
-	key     string
-	typ     string
-	label   string
-}{
-	{1001, "first_name", "text", "First name"},
-	{1002, "last_name", "text", "Last name"},
-	{1003, "email", "email", "Email"},
-	{1004, "phone", "tel", "Phone"},
-	{1005, "message", "textarea", "Message"},
+type siteSeed struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+type updateTypeSeed struct {
+	Code  string `json:"code"`
+	Title string `json:"title"`
+}
+
+type fieldSeed struct {
+	FieldID int64  `json:"field_id"`
+	Key     string `json:"key"`
+	Type    string `json:"type"`
+	Label   string `json:"label"`
+}
+
+type emailSeed struct {
+	MessageID    string `json:"message_id"`
+	Subject      string `json:"subject"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	Status       int16  `json:"status"`
+	ContentPlain string `json:"content_plain"`
+	ContentHTML  string `json:"content_html"`
+}
+
+type historySeed struct {
+	FieldIndex int     `json:"field_index"`
+	UpdateType string  `json:"update_type"`
+	OldValue   *string `json:"old_value"`
+	NewValue   *string `json:"new_value"`
+	HoursAgo   int     `json:"hours_ago"`
+}
+
+type seedData struct {
+	Admin       adminSeed
+	Site        siteSeed
+	UpdateTypes []updateTypeSeed
+	Fields      []fieldSeed
+	Emails      []emailSeed
+	History     []historySeed
+}
+
+func loadSeeds() seedData {
+	var s seedData
+	mustDecode("seeds/admin.json", &s.Admin)
+	mustDecode("seeds/site.json", &s.Site)
+	mustDecode("seeds/update_types.json", &s.UpdateTypes)
+	mustDecode("seeds/fields.json", &s.Fields)
+	mustDecode("seeds/emails.json", &s.Emails)
+	mustDecode("seeds/history.json", &s.History)
+	return s
+}
+
+func mustDecode(path string, out any) {
+	data, err := seedFS.ReadFile(path)
+	if err != nil {
+		fail("read %s: %v", path, err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		fail("decode %s: %v", path, err)
+	}
 }
 
 func main() {
+	seeds := loadSeeds()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -73,44 +129,44 @@ func main() {
 		bcryptCost = bcrypt.DefaultCost
 	}
 
-	adminID, adminCreated := upsertAdminUser(ctx, db, bcryptCost)
+	adminID, adminCreated := upsertAdminUser(ctx, db, bcryptCost, seeds.Admin)
 	adminToken := issueSanctumToken(ctx, db, adminID)
-	siteID, token, isNew := upsertSite(ctx, db)
-	seedUpdateTypes(ctx, db)
-	seedFields(ctx, db, siteID)
-	seedEmails(ctx, db, siteID)
-	seedHistory(ctx, db, siteID)
+	siteID, token, isNew := upsertSite(ctx, db, seeds.Site)
+	seedUpdateTypes(ctx, db, seeds.UpdateTypes)
+	seedFields(ctx, db, siteID, seeds.Fields)
+	seedEmails(ctx, db, siteID, seeds.Emails)
+	seedHistory(ctx, db, siteID, seeds.History)
 
 	fmt.Println("---")
-	fmt.Printf("Admin user:     id=%d email=%s\n", adminID, adminEmail)
-	fmt.Printf("Admin password: %s\n", adminPassword)
+	fmt.Printf("Admin user:     id=%d email=%s\n", adminID, seeds.Admin.Email)
+	fmt.Printf("Admin password: %s\n", seeds.Admin.Password)
 	fmt.Printf("Admin sanctum:  %s\n", adminToken)
 	if !adminCreated {
 		fmt.Println("(admin already existed; password reset to the value above; new sanctum token issued)")
 	}
 	fmt.Println("---")
-	fmt.Printf("Demo site:      id=%d url=%s\n", siteID, siteURL)
+	fmt.Printf("Demo site:      id=%d url=%s\n", siteID, seeds.Site.URL)
 	fmt.Printf("REST bearer:    %s\n", token)
 	if !isNew {
 		fmt.Println("(site already existed; token shown is the existing one)")
 	}
-	fmt.Println("Update types:  ", len(updateTypes))
-	fmt.Println("Fields:        ", len(fields))
-	fmt.Println("Emails:         3 rows")
-	fmt.Println("Entry history:  3 rows")
+	fmt.Println("Update types:  ", len(seeds.UpdateTypes))
+	fmt.Println("Fields:        ", len(seeds.Fields))
+	fmt.Println("Emails:        ", len(seeds.Emails), "rows")
+	fmt.Println("Entry history: ", len(seeds.History), "rows")
 }
 
 // ---------- admin user (idempotent on email) ----------
 
-func upsertAdminUser(ctx context.Context, db *sqlx.DB, bcryptCost int) (userID int64, created bool) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcryptCost)
+func upsertAdminUser(ctx context.Context, db *sqlx.DB, bcryptCost int, admin adminSeed) (userID int64, created bool) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(admin.Password), bcryptCost)
 	must(err)
 
-	err = db.GetContext(ctx, &userID, "SELECT id FROM users WHERE email = $1", adminEmail)
+	err = db.GetContext(ctx, &userID, "SELECT id FROM users WHERE email = $1", admin.Email)
 	if err == nil {
 		_, err := db.ExecContext(ctx,
 			"UPDATE users SET name=$1, password=$2, updated_at=NOW() WHERE id=$3",
-			adminName, string(hash), userID)
+			admin.Name, string(hash), userID)
 		must(err)
 		return userID, false
 	}
@@ -119,7 +175,7 @@ func upsertAdminUser(ctx context.Context, db *sqlx.DB, bcryptCost int) (userID i
 	}
 	must(db.QueryRowxContext(ctx,
 		"INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id",
-		adminName, adminEmail, string(hash),
+		admin.Name, admin.Email, string(hash),
 	).Scan(&userID))
 	return userID, true
 }
@@ -139,9 +195,9 @@ func issueSanctumToken(ctx context.Context, db *sqlx.DB, userID int64) string {
 
 // ---------- site + token (idempotent) ----------
 
-func upsertSite(ctx context.Context, db *sqlx.DB) (siteID int64, token string, isNew bool) {
+func upsertSite(ctx context.Context, db *sqlx.DB, site siteSeed) (siteID int64, token string, isNew bool) {
 	var existing int64
-	err := db.GetContext(ctx, &existing, "SELECT id FROM sites WHERE url = $1", siteURL)
+	err := db.GetContext(ctx, &existing, "SELECT id FROM sites WHERE url = $1", site.URL)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		fail("look up site: %v", err)
 	}
@@ -161,7 +217,7 @@ func upsertSite(ctx context.Context, db *sqlx.DB) (siteID int64, token string, i
 	must(err)
 	defer tx.Rollback()
 
-	must(tx.QueryRowxContext(ctx, "INSERT INTO sites (name, url) VALUES ($1, $2) RETURNING id", siteName, siteURL).Scan(&siteID))
+	must(tx.QueryRowxContext(ctx, "INSERT INTO sites (name, url) VALUES ($1, $2) RETURNING id", site.Name, site.URL).Scan(&siteID))
 	token = randomHex(32)
 	_, err = tx.ExecContext(ctx, "INSERT INTO site_tokens (site_id, token) VALUES ($1, $2)", siteID, token)
 	must(err)
@@ -171,59 +227,50 @@ func upsertSite(ctx context.Context, db *sqlx.DB) (siteID int64, token string, i
 
 // ---------- frm_entry_update_types (idempotent on code) ----------
 
-func seedUpdateTypes(ctx context.Context, db *sqlx.DB) {
-	for _, t := range updateTypes {
+func seedUpdateTypes(ctx context.Context, db *sqlx.DB, types []updateTypeSeed) {
+	for _, t := range types {
 		var id int64
-		err := db.GetContext(ctx, &id, "SELECT id FROM frm_entry_update_types WHERE code = $1", t.code)
+		err := db.GetContext(ctx, &id, "SELECT id FROM frm_entry_update_types WHERE code = $1", t.Code)
 		if err == nil {
-			_, err := db.ExecContext(ctx, "UPDATE frm_entry_update_types SET title = $1, updated_at = NOW() WHERE id = $2", t.title, id)
+			_, err := db.ExecContext(ctx, "UPDATE frm_entry_update_types SET title = $1, updated_at = NOW() WHERE id = $2", t.Title, id)
 			must(err)
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			fail("lookup update_type %s: %v", t.code, err)
+			fail("lookup update_type %s: %v", t.Code, err)
 		}
-		_, err = db.ExecContext(ctx, "INSERT INTO frm_entry_update_types (code, title) VALUES ($1, $2)", t.code, t.title)
+		_, err = db.ExecContext(ctx, "INSERT INTO frm_entry_update_types (code, title) VALUES ($1, $2)", t.Code, t.Title)
 		must(err)
 	}
 }
 
 // ---------- frm_fields (idempotent on (site_id, field_id)) ----------
 
-func seedFields(ctx context.Context, db *sqlx.DB, siteID int64) {
+func seedFields(ctx context.Context, db *sqlx.DB, siteID int64, fields []fieldSeed) {
 	for _, f := range fields {
 		var id int64
-		err := db.GetContext(ctx, &id, "SELECT id FROM frm_fields WHERE site_id = $1 AND field_id = $2", siteID, f.fieldID)
+		err := db.GetContext(ctx, &id, "SELECT id FROM frm_fields WHERE site_id = $1 AND field_id = $2", siteID, f.FieldID)
 		if err == nil {
 			_, err := db.ExecContext(ctx,
 				"UPDATE frm_fields SET key=$1, type=$2, label=$3, updated_at=NOW() WHERE id=$4",
-				f.key, f.typ, f.label, id)
+				f.Key, f.Type, f.Label, id)
 			must(err)
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			fail("lookup field %d: %v", f.fieldID, err)
+			fail("lookup field %d: %v", f.FieldID, err)
 		}
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO frm_fields (field_id, site_id, key, type, label) VALUES ($1,$2,$3,$4,$5)",
-			f.fieldID, siteID, f.key, f.typ, f.label)
+			f.FieldID, siteID, f.Key, f.Type, f.Label)
 		must(err)
 	}
 }
 
 // ---------- frm_emails_log (upsert on (site_id, message_id)) ----------
 
-func seedEmails(ctx context.Context, db *sqlx.DB, siteID int64) {
-	type row struct {
-		messageID, subject, from, to string
-		status                       int16
-	}
-	rows := []row{
-		{"demo-msg-1", "Thanks for your order", "noreply@demo.local", "alice@example.com", 1},
-		{"demo-msg-2", "Password reset request", "noreply@demo.local", "bob@example.com", 1},
-		{"demo-msg-3", "Weekly digest", "digest@demo.local", "carol@example.com", 0},
-	}
-	for _, r := range rows {
+func seedEmails(ctx context.Context, db *sqlx.DB, siteID int64, emails []emailSeed) {
+	for _, r := range emails {
 		_, err := db.ExecContext(ctx, `
 			INSERT INTO frm_emails_log
 				(entry_id, site_id, subject, message_id, email_from, email_to, content_plain, content_html, status, date_sent)
@@ -231,52 +278,64 @@ func seedEmails(ctx context.Context, db *sqlx.DB, siteID int64) {
 			ON CONFLICT (site_id, message_id) DO UPDATE SET
 				subject=EXCLUDED.subject, email_from=EXCLUDED.email_from, email_to=EXCLUDED.email_to,
 				status=EXCLUDED.status, updated_at=NOW()
-		`, 9001, siteID, r.subject, r.messageID, r.from, r.to, "plain body", "<p>html body</p>", r.status, time.Now().UTC())
+		`, entryID, siteID, r.Subject, r.MessageID, r.From, r.To, r.ContentPlain, r.ContentHTML, r.Status, time.Now().UTC())
 		must(err)
 	}
 }
 
-// ---------- frm_entry_history (append; only insert if entry_id 9001 has no rows yet) ----------
+// ---------- frm_entry_history (append; only insert if entryID has no rows yet) ----------
 
-func seedHistory(ctx context.Context, db *sqlx.DB, siteID int64) {
+func seedHistory(ctx context.Context, db *sqlx.DB, siteID int64, history []historySeed) {
+	if len(history) == 0 {
+		return
+	}
+
 	var existing int64
-	must(db.GetContext(ctx, &existing, "SELECT COUNT(*) FROM frm_entry_history WHERE site_id = $1 AND entry_id = 9001", siteID))
+	must(db.GetContext(ctx, &existing, "SELECT COUNT(*) FROM frm_entry_history WHERE site_id = $1 AND entry_id = $2", siteID, entryID))
 	if existing > 0 {
 		return
 	}
 
 	var fieldRows []int64
-	must(db.SelectContext(ctx, &fieldRows, "SELECT id FROM frm_fields WHERE site_id = $1 ORDER BY id ASC LIMIT 3", siteID))
-	if len(fieldRows) < 3 {
-		return
-	}
+	must(db.SelectContext(ctx, &fieldRows, "SELECT id FROM frm_fields WHERE site_id = $1 ORDER BY id ASC", siteID))
 
-	var createdType, updatedType int64
-	must(db.GetContext(ctx, &createdType, "SELECT id FROM frm_entry_update_types WHERE code='created'"))
-	must(db.GetContext(ctx, &updatedType, "SELECT id FROM frm_entry_update_types WHERE code='updated'"))
+	updateTypeIDs := map[string]int64{}
+	rows, err := db.QueryxContext(ctx, "SELECT code, id FROM frm_entry_update_types")
+	must(err)
+	defer rows.Close()
+	for rows.Next() {
+		var code string
+		var id int64
+		must(rows.Scan(&code, &id))
+		updateTypeIDs[code] = id
+	}
+	must(rows.Err())
 
 	now := time.Now().UTC()
-	rows := []struct {
-		fieldID  int64
-		typeID   int64
-		oldV     sql.NullString
-		newV     sql.NullString
-		changeAt time.Time
-	}{
-		{fieldRows[0], createdType, sql.NullString{}, sql.NullString{String: "Alice", Valid: true}, now.Add(-2 * time.Hour)},
-		{fieldRows[1], updatedType, sql.NullString{String: "Smyth", Valid: true}, sql.NullString{String: "Smith", Valid: true}, now.Add(-1 * time.Hour)},
-		{fieldRows[2], updatedType, sql.NullString{}, sql.NullString{String: "alice@example.com", Valid: true}, now},
-	}
-	for _, r := range rows {
+	for _, h := range history {
+		if h.FieldIndex < 0 || h.FieldIndex >= len(fieldRows) {
+			fail("history field_index %d out of range (have %d fields)", h.FieldIndex, len(fieldRows))
+		}
+		typeID, ok := updateTypeIDs[h.UpdateType]
+		if !ok {
+			fail("history update_type %q not seeded", h.UpdateType)
+		}
 		_, err := db.ExecContext(ctx, `
 			INSERT INTO frm_entry_history (entry_id, site_id, field_id, update_type_id, old_value, new_value, change_date)
-			VALUES (9001, $1, $2, $3, $4, $5, $6)
-		`, siteID, r.fieldID, r.typeID, r.oldV, r.newV, r.changeAt)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, entryID, siteID, fieldRows[h.FieldIndex], typeID, nullString(h.OldValue), nullString(h.NewValue), now.Add(-time.Duration(h.HoursAgo)*time.Hour))
 		must(err)
 	}
 }
 
 // ---------- helpers ----------
+
+func nullString(s *string) sql.NullString {
+	if s == nil {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: *s, Valid: true}
+}
 
 func randomHex(n int) string {
 	buf := make([]byte, n)

@@ -1,0 +1,23 @@
+[
+  {
+    "field_index": 0,
+    "update_type": "created",
+    "old_value":   null,
+    "new_value":   "Alice",
+    "hours_ago":   2
+  },
+  {
+    "field_index": 1,
+    "update_type": "updated",
+    "old_value":   "Smyth",
+    "new_value":   "Smith",
+    "hours_ago":   1
+  },
+  {
+    "field_index": 2,
+    "update_type": "updated",
+    "old_value":   null,
+    "new_value":   "alice@example.com",
+    "hours_ago":   0
+  }
+]

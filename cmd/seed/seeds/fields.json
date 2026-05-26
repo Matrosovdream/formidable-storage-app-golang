@@ -1,0 +1,7 @@
+[
+  { "field_id": 1001, "key": "first_name", "type": "text",     "label": "First name" },
+  { "field_id": 1002, "key": "last_name",  "type": "text",     "label": "Last name"  },
+  { "field_id": 1003, "key": "email",      "type": "email",    "label": "Email"      },
+  { "field_id": 1004, "key": "phone",      "type": "tel",      "label": "Phone"      },
+  { "field_id": 1005, "key": "message",    "type": "textarea", "label": "Message"    }
+]

@@ -1,0 +1,29 @@
+[
+  {
+    "message_id":    "demo-msg-1",
+    "subject":       "Thanks for your order",
+    "from":          "noreply@demo.local",
+    "to":            "alice@example.com",
+    "status":        1,
+    "content_plain": "plain body",
+    "content_html":  "<p>html body</p>"
+  },
+  {
+    "message_id":    "demo-msg-2",
+    "subject":       "Password reset request",
+    "from":          "noreply@demo.local",
+    "to":            "bob@example.com",
+    "status":        1,
+    "content_plain": "plain body",
+    "content_html":  "<p>html body</p>"
+  },
+  {
+    "message_id":    "demo-msg-3",
+    "subject":       "Weekly digest",
+    "from":          "digest@demo.local",
+    "to":            "carol@example.com",
+    "status":        0,
+    "content_plain": "plain body",
+    "content_html":  "<p>html body</p>"
+  }
+]
