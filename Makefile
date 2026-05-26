@@ -28,7 +28,7 @@ dev-logs:
 	$(DEV) logs -f web worker
 
 prod:
-	$(PROD) --env-file .env.prod up -d --build
+	$(PROD) --env-file .env up -d --build
 
 prod-down:
 	$(PROD) down
