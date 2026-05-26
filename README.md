@@ -113,12 +113,12 @@ cp .env.example .env
 nano .env
 
 docker network create traefik-network      # if it doesn't exist yet
-make prod-deploy                           # builds web, then worker, then `up -d`
+make prod                                  # builds web, then worker, then `up -d`
 ```
 
-`make prod-deploy` builds services sequentially so a small VM can compile
-without OOM. If you have plenty of RAM, `make prod` (parallel build) is
-faster.
+`make prod` always builds services sequentially so small VMs can compile
+without OOM. Combined with BuildKit cache mounts in the Dockerfile, this
+makes the worker build (after web) and every subsequent redeploy fast.
 
 The `migrate` service runs once on boot and applies any pending
 migrations — verify with `docker compose -f compose.prod.yaml logs migrate`.
@@ -128,7 +128,7 @@ migrations — verify with `docker compose -f compose.prod.yaml logs migrate`.
 ```bash
 cd /opt/apps/formidable-storage-app-golang
 git pull
-make prod-deploy
+make prod
 ```
 
 That rebuilds the changed images sequentially, recreates `web`/`worker`,

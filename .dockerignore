@@ -15,6 +15,11 @@
 bin/
 tmp/
 *.log
+# Stray compiled binaries at repo root (e.g. `./seed` from `go build`)
+/seed
+/web
+/worker
+*.exe
 
 # Sub-trees we never want copied into the image
 project-reference/

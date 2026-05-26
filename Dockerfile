@@ -8,7 +8,8 @@ RUN apk add --no-cache git ca-certificates tzdata
 WORKDIR /src
 ENV CGO_ENABLED=0 GOFLAGS=-buildvcs=false
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # -----------------------------------------------------------------------------
 # Dev image: includes air for hot reload. Source is mounted at runtime.
@@ -25,7 +26,9 @@ ENTRYPOINT ["air", "-c", ".air.toml"]
 FROM base AS builder
 ARG BIN=web
 COPY . .
-RUN go build -trimpath -ldflags="-s -w" -o /out/app ./cmd/${BIN}
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build -trimpath -ldflags="-s -w" -o /out/app ./cmd/${BIN}
 
 # -----------------------------------------------------------------------------
 # Runtime: minimal distroless image with just the binary.
